@@ -1,0 +1,94 @@
+debug:
+  error: false
+  echolog: false
+
+workdir: ""
+
+download:
+  filenameTemplate: "{{filename}}_{{spec}}"
+  dir: "%UserDownloads%"
+  playDoneAudio: true
+  defaultActionWhenExisting: ""
+  maxRunning: 3
+  remoteServer:
+    enabled: false
+    protocol: "http"
+    hostname: "192.168.1.2"
+    port: 2022
+
+api:
+  protocol: "http"
+  hostname: "127.0.0.1"
+  port: 2022
+
+cookie:
+  uuid: ""
+  password: ""
+  key: ""
+
+update:
+  proxy: ""
+  mirror: ""
+
+db:
+  type: "sqlite"
+  host: ""
+  port: ""
+  username: ""
+  password: ""
+  filename: ""
+  filepath: "%CWD%/data.db"
+
+# 安全预置（v1.1.5）：proxy 段默认关闭。
+# 历史事故：工具默认 proxy.enabled+system=true 会把 Windows 系统代理指向
+# 127.0.0.1:2023 —— Go 程序调 netsh 每次闪 CMD 黑窗；进程被强杀时
+# 代理设置残留导致全系统断网（ECONNREFUSED 127.0.0.1:2023）。
+# 视频号解析走 sphCookie 方案即可，无需系统代理。
+proxy:
+  enabled: false
+  system: false
+  hostname: "127.0.0.1"
+  port: 2023
+  tcpRelay:
+    enabled: false
+    hostname: "127.0.0.1"
+    port: 9900
+  tun: false
+  defaultInterface: ""
+  skipInstallRootCert: false
+  upstreamProxy: ""
+
+channels:
+  enabled: true
+  disableLocationToHome: false
+  download:
+    defaultHighest: false
+    frontend: false
+    cover: false
+    pauseWhenDownload: false
+    forceCheckAllFeeds: false
+
+mp:
+  enabled: false
+  remoteServer:
+    protocol: "http"
+    hostname: ""
+    port: 80
+  refreshToken: "wx_channels_download"
+  tokenFilepath: ""
+  refreshSkipMinutes: 20
+  maxWebsocketClients: 5
+
+cloudflare:
+  accountId: ""
+  apiToken: ""
+  refreshToken: "wx_channels_download"
+  adminToken: ""
+  workerName: "mp-rss-api"
+  d1Name: "mp-rss-db"
+  sphWorkerName: "sph"
+  # 视频号解析必需：填入你自己的元宝 Cookie（k=v;k=v 字符串）。
+  # 获取方式：浏览器登录 yuanbao.tencent.com → F12 DevTools →
+  # Application → Cookies → 复制 .tencent.com 域下全部值拼成 k=v;k=v。
+  sphCookie: ""
+  sphCredential: ""
