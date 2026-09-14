@@ -3,7 +3,7 @@ name: multi-media-processor
 slug: deanyih-multi-media-processor
 displayName: 多媒体处理助手
 description: "多平台音视频下载、转写与内容处理（单一入口，无需中转其他技能）：视频号→解析原地址→下载→Whisper本地转写→核心观点；公众号→抓取正文→摘要；支持B站/YouTube/小红书/TikTok/微博/Dailymotion/Vimeo/抖音等平台的视频下载与转写；也支持直接传入本地音视频文件。输出格式支持 txt / srt / markdown / docx，共四种类型。纯文字类内容（公众号文章）不生成字幕，只输出 txt + markdown / docx 三种。"
-version: 1.1.8
+version: 1.1.9
 author: Dean Yih (adapted by 彤彤)
 license: MIT
 platforms: [windows, linux, macos]
@@ -36,7 +36,7 @@ metadata:
 - **输出格式**：`txt / srt / markdown / docx` 四选一或全部生成
 
 > 所有大文件依赖（ffmpeg、Whisper CLI引擎+dll、Whisper模型）**首次运行相关任务时自动从国内镜像下载**，路径全部自动推导。
-> **wx_channels_download 工具已原生支持全平台（Windows/macOS/Linux）**（v260817+）。
+> **wx_channels_download 工具已原生支持全平台（Windows/macOS/Linux）**（v260907+）。
 
 ---
 
@@ -273,7 +273,7 @@ python "scripts/multi-media-processor.py" "<链接>" --llm
 
 | 依赖 | 版本 | 上游仓库 | 下载源 |
 |------|------|----------|--------|
-| wx_channels_download | v260817 | [ltaoo/wx_channels_download](https://github.com/ltaoo/wx_channels_download) | GitHub Releases |
+| wx_channels_download | v260907 | [ltaoo/wx_channels_download](https://github.com/ltaoo/wx_channels_download) | GitHub Releases |
 | whisper.cpp CLI | b4938 | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) | GitHub Releases + ghfast.top 镜像 |
 | ffmpeg | 7.1 | [Gyan/codexffmpeg](https://www.gyan.dev/ffmpeg/builds/) | gyan.dev + ghfast.top 镜像 |
 | Whisper 模型 | v1.5.0 (ggml-small-q8_0) | [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp) | HuggingFace + ghfast.top 镜像 |
