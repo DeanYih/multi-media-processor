@@ -27,7 +27,7 @@ TEMP_DIR = SKILL_DIR / ".temp_downloads"
 
 # ========== 版本配置 ==========
 VERSIONS = {
-    "wx_channels_download": "v260817",
+    "wx_channels_download": "v260907",
     "whisper_cli": "b4938",
     "ffmpeg": "7.1",
     "whisper_model": "v1.5.0",
@@ -53,7 +53,7 @@ DEPENDENCY_SOURCES = {
 
 # ========== 文件哈希验证（安全哈希指纹）==========
 EXPECTED_HASHES = {
-    # wx_video_download.exe (Windows x86_64) - v260817
+    # wx_video_download.exe (Windows x86_64) - v260907
     "wx_video_download.exe": "be7fa37280f0223288a03c7e976be426",
 }
 
