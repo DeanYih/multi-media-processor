@@ -160,9 +160,14 @@ _WHISPER_EXT = ".exe" if os.name == "nt" else ""
 WHISPER_CLI = WHISPER_DIR / "bin" / f"whisper-cli{_WHISPER_EXT}"
 WHISPER_WORK = WHISPER_DIR / ".work"
 
-# wx_channels_download API
+# wx_channels_download API (v260907+)
 API_BASE = "http://127.0.0.1:2022"
-PARSE_SPH = API_BASE + "/api/channels/parse_sph"
+# 新版API使用下载任务系统
+DOWNLOAD_TASK_PREPARE_BY_URL = API_BASE + "/api/v1/download_task/prepare_by_url"
+DOWNLOAD_TASK_CREATE_BY_URL = API_BASE + "/api/v1/download_task/create_by_url"
+DOWNLOAD_TASK_LIST = API_BASE + "/api/v1/download_task/list"
+DOWNLOAD_TASK_START = API_BASE + "/api/v1/download_task/start"
+DOWNLOAD_TASK_DETAIL = API_BASE + "/api/v1/download_task/detail"
 
 def _save_work_dir(path: Path, *configs: Path) -> None:
     """把最终输出目录写入所有配置文件（用户级 + 技能内），写入失败静默忽略。"""
@@ -743,76 +748,78 @@ def extract_id(url: str, platform: str) -> str:
 # ==================== 微信视频号 ====================
 def process_sph(url, outdir):
     ensure_tool()
-    log("\n=== 1. parse_sph 解析原地址 ===")
-    r = httpx.get(PARSE_SPH, params={"url": url}, timeout=30)
+    log("\n=== 1. 准备下载任务 ===")
+    
+    # 新版API使用下载任务系统 (v260714+)
+    # 准备任务
+    r = httpx.post(
+        DOWNLOAD_TASK_PREPARE_BY_URL,
+        json={"objects": [{"url": url}]},
+        timeout=30
+    )
     data = r.json()
     if data.get("code") != 0:
-        # 修复(2026-08-26): 原 assert 直接抛原始 JSON；Cookie 类错误给出明确指引
         msg = str(data)
         if "cookie" in msg.lower():
-            log(f"[解析失败] {msg[:300]}")
+            log(f"[准备失败] {msg[:300]}")
             sys.exit("\nCookie 缺失或已失效：请更新 bin/wx_channels_download/config.yaml 的 "
                      "cloudflare.sphCookie（元宝 Cookie 会定期过期，重新按 F12 抓取即可）。")
-        raise RuntimeError(f"解析失败: {data}")
-    feed = data["data"]["data"]["feedInfo"]
-    author = data["data"]["data"]["authorInfo"]["nickname"]
-    desc = feed.get("description", "")
-    video_url = feed["h264VideoInfo"]["videoUrl"]
-    log(f"作者: {author}")
-    log(f"描述: {desc}")
-    log(f"videoUrl: {video_url[:90]}...")
-
-    mp4 = os.path.join(outdir, "video.mp4")
-    log("\n=== 2. 下载视频 ===")
-    with httpx.stream("GET", video_url, timeout=180, follow_redirects=True) as resp:
-        resp.raise_for_status()
-        with open(mp4, "wb") as f:
-            for chunk in resp.iter_bytes(chunk_size=65536):
-                f.write(chunk)
-    log(f"视频已存: {mp4}  ({os.path.getsize(mp4)} bytes)")
-
-    log("\n=== 3. Whisper 本地转写 (small, zh) ===")
-    transcript = os.path.join(outdir, "transcript_raw.txt")
-    work = os.path.join(str(WHISPER_WORK), sph_id(url))
-    try:
-        _silent_check_call([
-            PY, str(WHISPER_DIR / "scripts" / "transcribe.py"), mp4,
-            "--model", "small", "--lang", "zh",
-            "--out", transcript, "--exe", str(WHISPER_CLI),
-            "--work", work,
-        ], timeout=1800)
-    except subprocess.CalledProcessError as e:
-        log(f"[Whisper] 转写失败 (exit={e.returncode})，跳过转写步骤")
-    except subprocess.TimeoutExpired:
-        log("[Whisper] 转写超时（>30分钟），已终止进程")
-    else:
-        with open(transcript, encoding="utf-8") as f:
-            raw = f.read()
-        simp = "".join(TC2SC.get(ch, ch) for ch in raw)
-        if simp != raw:
-            transcript_sc = os.path.join(outdir, "transcript_simplified.txt")
-            with open(transcript_sc, "w", encoding="utf-8") as f:
-                f.write(simp)
-            log(f"已生成简体副本: {transcript_sc}")
-        log(f"转写已存: {transcript}  ({os.path.getsize(transcript)} bytes)")
-        # 生成带时间戳的 TXT
-        _srt = os.path.join(outdir, "subtitle.srt")
-        if os.path.exists(_srt):
-            try:
-                # 视频号用描述/作者作为命名主题（无描述时回退 video）
-                _sph_title = safe_slug(desc) or safe_slug(author) or "video"
-                generate_timestamped_txt(outdir, _sph_title)
-            except Exception as e:
-                log(f"[时间戳TXT] 生成失败: {e}")
-
-    meta = {
-        "type": "sph_video", "url": url, "author": author,
-        "description": desc, "video_url": video_url,
-        "files": {"video": mp4, "transcript": transcript},
-    }
-    with open(os.path.join(outdir, "metadata.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    return meta
+        raise RuntimeError(f"准备下载任务失败: {data}")
+    
+    # 创建下载任务
+    log("\n=== 2. 创建下载任务 ===")
+    r = httpx.post(
+        DOWNLOAD_TASK_CREATE_BY_URL,
+        json={"objects": [{"url": url, "download_dir": outdir}]},
+        timeout=30
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"创建下载任务失败: {data}")
+    
+    # 获取任务ID
+    task_id = data["data"]["objects"][0]["task_id"]
+    log(f"任务ID: {task_id}")
+    
+    # 启动下载
+    log("\n=== 3. 启动下载任务 ===")
+    r = httpx.post(
+        DOWNLOAD_TASK_START,
+        json={"task_ids": [task_id]},
+        timeout=10
+    )
+    data = r.json()
+    if data.get("code") != 0:
+        raise RuntimeError(f"启动下载任务失败: {data}")
+    
+    log(f"✅ 下载任务已创建并启动: {task_id}")
+    log(f"   下载目录: {outdir}")
+    
+    # 等待下载完成并获取结果
+    log("\n=== 4. 等待下载完成 ===")
+    for i in range(60):  # 最多等待60秒
+        time.sleep(2)
+        r = httpx.get(
+            f"{DOWNLOAD_TASK_DETAIL}/{task_id}",
+            timeout=10
+        )
+        data = r.json()
+        if data.get("code") == 0 and data["data"]:
+            task = data["data"]
+            status = task.get("status", "")
+            if status in ["success", "completed", "done"]:
+                log(f"✅ 下载完成!")
+                # 获取文件信息
+                files = task.get("files", [])
+                if files:
+                    for f in files:
+                        log(f"   文件: {f.get('name')} ({f.get('size', 0)} bytes)")
+                return {"task_id": task_id, "status": status, "files": files}
+            elif status in ["failed", "error"]:
+                raise RuntimeError(f"下载失败: {task.get('error', '未知错误')}")
+            log(f"   状态: {status} ({i+1}/60)")
+    
+    raise RuntimeError("下载超时")
 
 
 # ==================== 微信公众号 ====================
