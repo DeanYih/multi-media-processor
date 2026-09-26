@@ -399,7 +399,7 @@ python "scripts/multi-media-processor.py" "<链接>" --enhance --ocr --model sma
 **注意**：OCR 对模糊、倾斜、艺术字体的识别效果有限，主要对标准宋体/黑体字幕效果最佳。
 若返回 0 条，先确认画面是否真有硬编码文字（部分视频的字幕是播放器叠加层，不在画面像素里，无法 OCR）。
 
-### 5.7 性能优化（v1.2.0+）
+### 5.6 性能优化（v1.2.0+）
 
 v1.2.0 对两个主要瓶颈做了实测优化（基准：16 核 CPU，2 分 17 秒英文视频）。
 
@@ -441,7 +441,7 @@ python "scripts/multi-media-processor.py" "<链接>" --ocr --ocr-bottom 0.35 --o
 - 唱歌/带 BGM 视频用 `--enhance`：会自动判断有无音乐，有则先做人声分离再转写。
 - 专有名词多的内容可传 `--prompt "术语1 术语2"`（主命令与 transcribe.py 均支持）提升识别。
 
-### 5.8 唱歌/带 BGM 视频：OCR 比人声分离更有效（v1.2.1 实测）
+### 5.7 唱歌/带 BGM 视频：OCR 比人声分离更有效（v1.2.1 实测）
 
 **结论先说**：对唱歌视频，`--ocr` 识别画面硬编码歌词的质量**显著高于** Whisper 转写，
 而 `--enhance` 的人声分离（demucs）对准确率**提升有限**。两者建议同时开，但读结果时以 OCR 为准。
@@ -469,7 +469,7 @@ python "scripts/multi-media-processor.py" "<链接>" --model medium --enhance --
 - **v1.2.3+ 支持 OCR 校正 ASR**：用 `--ocr-correct` 开关，按时间窗口对齐画面 OCR 与 Whisper SRT，
   相似度达标则用 OCR 歌词替换 ASR 转写，生成 `corrected_subtitle.srt` 和校正后的 txt/md/docx。
 
-### 5.6 原语言输出（v1.1.9+）
+### 5.8 原语言输出（v1.1.9+）
 
 默认 `--lang zh` 会把音频强制按中文转写。**若视频原声是英文，应显式指定语言**，才能得到英文原文而非中文音译。
 
@@ -509,7 +509,7 @@ python "scripts/multi-media-processor.py" "<链接>" --lang auto --format md
 python "scripts/multi-media-processor.py" "<链接>" --lang auto --ocr --format md
 ```
 
-### 5.7 双语转写（v1.3.1+）
+### 5.9 双语转写（v1.3.1+）
 
 启用 `--bilingual` 参数后，技能会检测转写文本中的英文部分，并在其后附加中文翻译。
 
@@ -545,7 +545,7 @@ So what is repair?
 - 建议在无代理环境或使用 LLM API 时启用以获得最佳效果
 - LLM API 配置：设置环境变量 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` 并配合 `--llm --bilingual`
 
-### 5.9 OCR 校正 ASR（v1.2.3+）
+### 5.10 OCR 校正 ASR（v1.2.3+）
 
 对唱歌视频，Whisper 转写差（如"说草草草草"）而画面 OCR 歌词准（"说曹操曹操就到"）。
 开启 `--ocr-correct` 后，技能会：
@@ -571,7 +571,7 @@ python "scripts/multi-media-processor.py" "<链接>" --enhance --ocr --ocr-corre
 - `--ocr-bottom 0.35`：只扫画面底部 35%，避免医院标语等干扰
 - 相似度阈值默认 `0.20`，可调但一般无需修改
 
-### 5.10 唱歌视频 OCR-ASR 跨验证（v1.3.0+，独立工作流；脚本 v1.3.9 起随包发布）
+### 5.11 唱歌视频 OCR-ASR 跨验证（v1.3.0+，独立工作流；脚本 v1.3.9 起随包发布）
 
 > 本节原为手工流程记录（脚本未随包提供）。v1.3.9 已把该工作流实现为
 > `scripts/cross_validate_ocr_asr.py`，并对齐了本文档描述的 CLI 契约；
@@ -628,7 +628,7 @@ python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --ocr-bott
 - `<主题>_v13.txt`：纯歌词
 - `<主题>_v13.srt`：SRT 字幕
 
-### 5.11 ASR 术语自动修正 — 多领域智能检测（v1.3.5+）
+### 5.12 ASR 术语自动修正 — 多领域智能检测（v1.3.5+）
 
 Whisper 中文转写存在大量同音/近音错误（如"显起"→"险企"、"扁挑体"→"扁桃体"、"数居"→"数据"）。
 技能内置术语替换机制，转写完成后**自动**检测领域并应用对应词典修正，无需手动干预。
