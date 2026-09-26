@@ -54,7 +54,7 @@ DEPENDENCY_SOURCES = {
 # ========== 文件哈希验证（安全哈希指纹）==========
 EXPECTED_HASHES = {
     # wx_video_download.exe (Windows x86_64) - v260907
-    "wx_video_download.exe": "be7fa37280f0223288a03c7e976be426",
+    "wx_video_download.exe": "99994eb02616c378b91b0e5328b8e562",
 }
 
 # ========== 国内镜像加速配置 ==========

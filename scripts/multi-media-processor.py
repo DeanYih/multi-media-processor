@@ -30,65 +30,52 @@ def safe_slug(s: str, maxlen: int = 60) -> str:
     return s[:maxlen]
 
 
-# ---------------- 跨平台 Python 环境检测 ----------------
-def _find_python() -> Optional[str]:
-    """通用 Python 检测：优先 sys.executable，其次 PATH，最后常见安装路径。
-    兼容 Hermes、WorkBuddy、Cursor、Copilot、独立脚本等多种运行环境。"""
-    # 1. 当前进程使用的 Python（最可靠）
-    cur = sys.executable
-    if cur and os.path.isfile(cur):
-        return cur
+# ---------------- WorkBuddy 隔离 venv 自举 ----------------
+def _wb_venv_python() -> Optional[str]:
+    venv = Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default"
+    p = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return str(p) if p.exists() else None
 
-    # 2. WorkBuddy 专属路径（向后兼容）
-    wb_paths = []
-    for suffix in ["Scripts/python.exe", "bin/python"]:
-        p = Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default" / suffix
-        if p.exists():
-            wb_paths.append(str(p))
-    if wb_paths:
-        return wb_paths[0]
 
-    # 3. PATH 中的 python3 / python
-    for name in ("python3", "python"):
-        found = shutil.which(name)
-        if found:
-            return found
-
-    # 4. Windows 常见安装位置
-    if os.name == "nt":
-        candidates = [
-            Path("C:/Python311/python.exe"),
-            Path("C:/Python310/python.exe"),
-            Path("C:/Python39/python.exe"),
-            Path("C:/Python38/python.exe"),
-            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python311" / "python.exe",
-            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python310" / "python.exe",
-        ]
-        for c in candidates:
-            if c.exists():
-                return str(c)
-
+def _wb_managed_python() -> Optional[str]:
+    base = getattr(sys, "_base_executable", None)
+    if base and "binaries/python/versions" in base:
+        return base
+    root = Path.home() / ".workbuddy" / "binaries" / "python" / "versions"
+    if root.exists():
+        vers = sorted(root.glob("*"), key=lambda p: p.name)
+        for v in reversed(vers):
+            cand = v / ("python.exe" if os.name == "nt" else "python")
+            if cand.exists():
+                return str(cand)
     return None
 
 
-def _ensure_python_exists() -> Optional[str]:
-    """确保 Python 可用，返回 Python 路径；不可用返回 None。"""
-    py = _find_python()
-    if not py:
-        print("[错误] 未找到 Python 解释器，请安装 Python 3.8+ 并加入 PATH", flush=True)
-        return None
-    # 验证可执行
+def _bootstrap_venv():
+    venv_py = _wb_venv_python()
+    cur = sys.executable.replace("\\", "/")
+    if venv_py and cur == venv_py.replace("\\", "/"):
+        return
     try:
-        result = subprocess.run([py, "--version"], capture_output=True, text=True, timeout=10)
-        if result.returncode == 0:
-            return py
-    except Exception:
-        pass
-    print(f"[警告] Python 验证失败: {py}", flush=True)
-    return None
+        if not venv_py:
+            managed = _wb_managed_python()
+            if not managed:
+                return
+            venv = Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default"
+            subprocess.run([managed, "-m", "venv", str(venv)], check=True, timeout=300,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            venv_py = _wb_venv_python()
+            if not venv_py:
+                return
+        if os.name == 'nt':
+            sys.exit(subprocess.call([venv_py, *sys.argv]))
+        else:
+            os.execv(venv_py, [venv_py, *sys.argv])
+    except Exception as e:
+        print(f"[venv] 自动隔离失败，回退当前 Python: {e}", flush=True)
 
 
-_PYTHON_BIN = _ensure_python_exists()
+_bootstrap_venv()
 
 
 def log(*a):
@@ -114,21 +101,6 @@ def ensure_python_deps():
             "requests": "requests", "zhconv": "zhconv", "jieba": "jieba"}
     missing = []
     for pip_name, mod_name in pkgs.items():
-        spec = importlib.util.find_spec(mod_name)
-        if spec is None:
-            missing.append(pip_name)
-    if not missing:
-        return
-    # 使用当前 Python 的 pip 安装依赖
-    pip_cmd = [_PYTHON_BIN or sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
-    pip_cmd.extend(missing)
-    log(f"正在安装缺失的 Python 依赖: {', '.join(missing)} ...")
-    try:
-        subprocess.run(pip_cmd, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log("✅ 依赖安装完成")
-    except subprocess.CalledProcessError as e:
-        log(f"⚠️ pip 安装失败（{e}），请手动运行: pip install {' '.join(missing)}")
         try:
             importlib.import_module(mod_name)
         except ImportError:
@@ -149,6 +121,7 @@ ensure_python_deps()
 import httpx
 import yt_dlp
 import requests
+import scene_audio  # 场景/音频识别增强（懒加载，缺失依赖时自动降级）
 
 # ---------------- 自动推导路径 ----------------
 HERE = Path(__file__).resolve()
@@ -160,14 +133,9 @@ _WHISPER_EXT = ".exe" if os.name == "nt" else ""
 WHISPER_CLI = WHISPER_DIR / "bin" / f"whisper-cli{_WHISPER_EXT}"
 WHISPER_WORK = WHISPER_DIR / ".work"
 
-# wx_channels_download API (v260907+)
+# wx_channels_download API
 API_BASE = "http://127.0.0.1:2022"
-# 新版API使用下载任务系统
-DOWNLOAD_TASK_PREPARE_BY_URL = API_BASE + "/api/v1/download_task/prepare_by_url"
-DOWNLOAD_TASK_CREATE_BY_URL = API_BASE + "/api/v1/download_task/create_by_url"
-DOWNLOAD_TASK_LIST = API_BASE + "/api/v1/download_task/list"
-DOWNLOAD_TASK_START = API_BASE + "/api/v1/download_task/start"
-DOWNLOAD_TASK_DETAIL = API_BASE + "/api/v1/download_task/detail"
+PARSE_SPH = API_BASE + "/api/channels/parse_sph"
 
 def _save_work_dir(path: Path, *configs: Path) -> None:
     """把最终输出目录写入所有配置文件（用户级 + 技能内），写入失败静默忽略。"""
@@ -300,6 +268,7 @@ PY = sys.executable
 # LLM 总开关：默认 False —— 全程不调用任何 LLM，纯本地规则式处理。
 # 仅当用户显式要求时开启：命令行 `--llm`，或环境变量 LLM_ENABLED=1。
 LLM_ENABLED = os.environ.get("LLM_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+BILINGUAL_ENABLED = os.environ.get("BILINGUAL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
@@ -447,6 +416,132 @@ def _read_sph_cookie(cfg_path: Path) -> str:
     return ""
 
 
+# 元宝 Cookie 统一密钥名（走环境变量 / ~/.workbuddy/.secrets.env，不落盘进技能目录）
+SPH_COOKIE_ENV = "WX_SPH_COOKIE"
+
+
+def _load_secret_store():
+    """懒加载统一密钥模块（不强制依赖，缺失时降级到直接读 .secrets.env）。"""
+    lib = Path.home() / ".workbuddy" / "lib" / "secret_store.py"
+    if not lib.exists():
+        return None
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("secret_store", str(lib))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
+def _get_sph_cookie_secret() -> str:
+    """统一密钥管理读取元宝 Cookie：环境变量 WX_SPH_COOKIE 优先，回退 ~/.workbuddy/.secrets.env。
+
+    不在此函数里落盘——落盘由 _write_sph_cookie 注入到 exe 的运行时 config.yaml
+    （exe 只认 config.yaml，不读环境变量）。"""
+    # 1) 系统环境变量
+    v = os.environ.get(SPH_COOKIE_ENV, "").strip()
+    if v:
+        return v
+    # 2) 优先用统一密钥模块（与 secret_store 一致）
+    ss = _load_secret_store()
+    if ss is not None:
+        try:
+            v = (ss.get_secret(SPH_COOKIE_ENV) or "").strip()
+            if v:
+                return v
+        except Exception:
+            pass
+    # 3) 直接解析回退文件兜底
+    fb = Path.home() / ".workbuddy" / ".secrets.env"
+    if fb.exists():
+        try:
+            for line in fb.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, val = line.partition("=")
+                if k.strip() == SPH_COOKIE_ENV:
+                    return val.strip().strip('"').strip("'")
+        except Exception:
+            pass
+    return ""
+
+
+def _write_sph_cookie(cfg_path: Path, value: str) -> bool:
+    """把元宝 Cookie 写入 exe 运行时 config.yaml（exe 只认 config.yaml，不读环境变量）。
+
+    注意：sphCookie 是 cloudflare 块的子项（2 空格缩进），必须保留原行缩进，
+    否则会被提到顶层，导致其后仍带缩进的 sphCredential 成为 YAML 孤儿，
+    exe 启动报 'did not find expected key'。逐行处理以精确保留缩进。"""
+    try:
+        text = cfg_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    safe = value.replace("\\", "\\\\").replace('"', '\\"')
+    lines = text.splitlines(keepends=True)
+    found = False
+    for i, line in enumerate(lines):
+        m = re.match(r'^(\s*)sphCookie\s*:', line)
+        if m:
+            lines[i] = '%ssphCookie: "%s"\n' % (m.group(1), safe)
+            found = True
+            break
+    if not found:
+        lines.append('  sphCookie: "%s"\n' % safe)
+    try:
+        cfg_path.write_text(''.join(lines), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _inject_sph_cookie_into_config() -> bool:
+    """把 WX_SPH_COOKIE 注入到 exe 运行时 config.yaml；返回是否已就绪。"""
+    cfg = TOOL_DIR / "config.yaml"
+    if not cfg.exists():
+        return False
+    env_cookie = _get_sph_cookie_secret()
+    if not env_cookie:
+        return False
+    if env_cookie == _read_sph_cookie(cfg):
+        return True
+    return _write_sph_cookie(cfg, env_cookie)
+
+
+def _clear_sph_cookie_in_config() -> bool:
+    """下载完成后清空运行时 config.yaml 的明文 sphCookie，避免凭证长期落盘在技能目录。
+
+    安全依据：exe 启动即把 cookie 载入内存，清空文件不影响本次及后续同会话下载；
+    新会话由 _inject_sph_cookie_into_config 从 WX_SPH_COOKIE 重新注入。
+    注意：保留原行缩进（sphCookie 是 cloudflare 子项），逐行处理避免破坏 YAML 结构。"""
+    cfg = TOOL_DIR / "config.yaml"
+    if not cfg.exists():
+        return False
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if re.search(r'^\s*sphCookie\s*:\s*""\s*$', text, re.MULTILINE):
+        return True  # 已是空值
+    lines = text.splitlines(keepends=True)
+    found = False
+    for i, line in enumerate(lines):
+        m = re.match(r'^(\s*)sphCookie\s*:', line)
+        if m:
+            lines[i] = '%ssphCookie: ""\n' % m.group(1)
+            found = True
+            break
+    if not found:
+        lines.append('  sphCookie: ""\n')
+    try:
+        cfg.write_text(''.join(lines), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def _parse_cookie_string(cookie_str: str) -> dict:
     """解析 Cookie 字符串为字典
 
@@ -562,14 +657,24 @@ def ensure_config():
             return False
     # 运行时安全网：无论 Cookie 是否就绪，先确保 proxy 段关闭
     _ensure_proxy_disabled(tool_cfg)
-    # 修复(2026-08-26): 原版仅当模板存在时才提示配置 Cookie；实际安装 zip 自带
-    # config.yaml，导致 sphCookie 为空时不做任何提示、直接撞 parse_sph 400
-    if _read_sph_cookie(tool_cfg):
+    # 元宝 Cookie 走统一密钥管理：环境变量 WX_SPH_COOKIE -> ~/.workbuddy/.secrets.env
+    # 不落盘进技能目录 config.yaml。exe 只认 config.yaml，故运行时注入。
+    env_cookie = _get_sph_cookie_secret()
+    cfg_cookie = _read_sph_cookie(tool_cfg)
+    if env_cookie:
+        if _write_sph_cookie(tool_cfg, env_cookie):
+            log("[配置] 已从 WX_SPH_COOKIE 注入 sphCookie 到运行时配置（exe 读取用）")
         return True
-    log("[配置] 配置文件: " + str(tool_cfg))
-    log("请打开它，把 cloudflare.sphCookie 填为你的元宝 Cookie，保存后重跑。")
-    log("获取方式（自动获取）：在浏览器登录 yuanbao.tencent.com 后重试")
-    log("获取方式（手动粘贴）：F12 → Application → Cookies → 复制全部值拼成 k=v;k=v 字符串")
+    if cfg_cookie:
+        # 兼容旧明文配置（config.yaml 仍残留明文）——给出迁移提醒
+        log("[配置] 警告：当前使用 config.yaml 内的明文 sphCookie，建议改用环境变量 "
+            "WX_SPH_COOKIE（密钥不落盘）。")
+        return True
+    log("[配置] 缺少元宝 Cookie。请写入 ~/.workbuddy/.secrets.env：")
+    log("  追加一行  WX_SPH_COOKIE=<k=v;k=v 字符串>")
+    log("  （不要 setx：该 Cookie 超长会触发 Windows 1024 字符上限被截断；.secrets.env 无此限制）")
+    log("  获取方式：浏览器登录 yuanbao.tencent.com → F12 → Application → Cookies → "
+        "复制 .tencent.com 域下全部值拼成 k=v;k=v")
     return False
 
 
@@ -589,6 +694,9 @@ def start_tool():
         return False
     # 运行时安全网：启动工具前确保 proxy 关闭（防系统代理劫持/黑窗/断网）
     _ensure_proxy_disabled(TOOL_DIR / "config.yaml")
+    # 注入元宝 Cookie 到运行时 config.yaml（exe 只认 config.yaml，不读环境变量）
+    if not _inject_sph_cookie_into_config():
+        log("[tool] 提示：未找到 WX_SPH_COOKIE，视频号解析可能在 parse_sph 阶段报 Cookie 缺失")
     log(f"[tool] 后台启动 {exe.name} ...")
     log_path = os.path.join(str(TOOL_DIR), "stdout.log")
     popen_kwargs = {}
@@ -746,80 +854,129 @@ def extract_id(url: str, platform: str) -> str:
 
 
 # ==================== 微信视频号 ====================
-def process_sph(url, outdir):
+def process_sph(url, outdir, lang="zh", model="small", enhance=False):
+    """视频号解析：本地 wx_video_download.exe + 本地元宝 Cookie（WX_SPH_COOKIE）。
+
+    单一通道（已实测可下载真实视频）：启动本地 exe（监听 127.0.0.1:2022）→
+    调用 /api/channels/parse_sph，用本地元宝 Cookie 换出视频直链 → 下载 →
+    本地 Whisper 转写 → 产物落盘。"""
     ensure_tool()
-    log("\n=== 1. 准备下载任务 ===")
-    
-    # 新版API使用下载任务系统 (v260714+)
-    # 准备任务
-    r = httpx.post(
-        DOWNLOAD_TASK_PREPARE_BY_URL,
-        json={"objects": [{"url": url}]},
-        timeout=30
-    )
+    log("\n=== 1. parse_sph 解析原地址（本地 exe + 本地元宝 Cookie） ===")
+    r = httpx.get(PARSE_SPH, params={"url": url}, timeout=30)
     data = r.json()
     if data.get("code") != 0:
+        # 修复(2026-08-26): 原 assert 直接抛原始 JSON；Cookie 类错误给出明确指引
         msg = str(data)
         if "cookie" in msg.lower():
-            log(f"[准备失败] {msg[:300]}")
-            sys.exit("\nCookie 缺失或已失效：请更新 bin/wx_channels_download/config.yaml 的 "
-                     "cloudflare.sphCookie（元宝 Cookie 会定期过期，重新按 F12 抓取即可）。")
-        raise RuntimeError(f"准备下载任务失败: {data}")
-    
-    # 创建下载任务
-    log("\n=== 2. 创建下载任务 ===")
-    r = httpx.post(
-        DOWNLOAD_TASK_CREATE_BY_URL,
-        json={"objects": [{"url": url, "download_dir": outdir}]},
-        timeout=30
-    )
-    data = r.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"创建下载任务失败: {data}")
-    
-    # 获取任务ID
-    task_id = data["data"]["objects"][0]["task_id"]
-    log(f"任务ID: {task_id}")
-    
-    # 启动下载
-    log("\n=== 3. 启动下载任务 ===")
-    r = httpx.post(
-        DOWNLOAD_TASK_START,
-        json={"task_ids": [task_id]},
-        timeout=10
-    )
-    data = r.json()
-    if data.get("code") != 0:
-        raise RuntimeError(f"启动下载任务失败: {data}")
-    
-    log(f"✅ 下载任务已创建并启动: {task_id}")
-    log(f"   下载目录: {outdir}")
-    
-    # 等待下载完成并获取结果
-    log("\n=== 4. 等待下载完成 ===")
-    for i in range(60):  # 最多等待60秒
-        time.sleep(2)
-        r = httpx.get(
-            f"{DOWNLOAD_TASK_DETAIL}/{task_id}",
-            timeout=10
-        )
-        data = r.json()
-        if data.get("code") == 0 and data["data"]:
-            task = data["data"]
-            status = task.get("status", "")
-            if status in ["success", "completed", "done"]:
-                log(f"✅ 下载完成!")
-                # 获取文件信息
-                files = task.get("files", [])
-                if files:
-                    for f in files:
-                        log(f"   文件: {f.get('name')} ({f.get('size', 0)} bytes)")
-                return {"task_id": task_id, "status": status, "files": files}
-            elif status in ["failed", "error"]:
-                raise RuntimeError(f"下载失败: {task.get('error', '未知错误')}")
-            log(f"   状态: {status} ({i+1}/60)")
-    
-    raise RuntimeError("下载超时")
+            log(f"[解析失败] {msg[:300]}")
+            sys.exit("\nCookie 缺失或已失效：请写入 ~/.workbuddy/.secrets.env 的 "
+                     "WX_SPH_COOKIE（元宝 Cookie 会定期过期，重新按 F12 抓取后覆盖该行即可；"
+                     "注意不要用 setx，超长会被 1024 上限截断）。")
+        raise RuntimeError(f"解析失败: {data}")
+    feed = data["data"]["data"]["feedInfo"]
+    author = data["data"]["data"]["authorInfo"]["nickname"]
+    desc = feed.get("description", "")
+    video_url = feed["h264VideoInfo"]["videoUrl"]
+    log(f"作者: {author}")
+    log(f"描述: {desc}")
+    log(f"videoUrl: {video_url[:90]}...")
+
+    return _sph_download_transcribe(outdir, lang, model, enhance, author, desc, video_url, url)
+
+
+
+
+def _sph_download_transcribe(outdir, lang, model, enhance, author, desc, video_url, url):
+    """视频号下载 + 本地 Whisper 转写 + 产物落盘（本地 exe 模式使用）。"""
+    mp4 = os.path.join(outdir, "video.mp4")
+    # 下载视频直链（video_url 来自 parse_sph，腾讯 CDN 直链；带 UA 防 403）
+    if not os.path.exists(mp4) or os.path.getsize(mp4) == 0:
+        log(f"\n=== 2. 下载视频 ===")
+        try:
+            with httpx.stream("GET", video_url, headers={"User-Agent": UA},
+                              follow_redirects=True, timeout=300) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("content-length", 0))
+                log(f"[下载] 目标: {mp4} ({total/1024/1024:.1f} MB)")
+                with open(mp4, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        f.write(chunk)
+            if os.path.getsize(mp4) == 0:
+                raise RuntimeError("下载文件大小为 0")
+            log(f"[下载] 完成 ({os.path.getsize(mp4)/1024/1024:.1f} MB)")
+        except Exception as e:
+            log(f"[下载] 失败: {e}")
+            raise
+    else:
+        log(f"[下载] 已存在，跳过")
+    log(f"\n=== 3. Whisper 本地转写 ({model}, {lang}) ===")
+    transcript = os.path.join(outdir, "transcript_raw.txt")
+    work = os.path.join(str(WHISPER_WORK), sph_id(url))
+
+    # 增强：唱歌/带BGM 视频先做人声分离，再送 Whisper
+    audio_src = mp4
+    if enhance:
+        try:
+            if scene_audio.audio_has_music_or_singing(mp4):
+                log("[增强] 检测到音乐/唱歌，尝试人声分离（demucs）...")
+                v = scene_audio.separate_vocals(mp4, outdir)
+                if v:
+                    audio_src = v
+                    log(f"[增强] 已切换到人声轨: {os.path.basename(v)}")
+                else:
+                    log("[增强] 人声分离不可用/失败，回退原音轨")
+            else:
+                log("[增强] 未检测到音乐/唱歌，跳过人声分离")
+        except Exception as e:
+            log(f"[增强] 人声分离跳过: {e}")
+
+    try:
+        _silent_check_call([
+            PY, str(WHISPER_DIR / "scripts" / "transcribe.py"), audio_src,
+            "--model", model, "--lang", lang,
+            "--out", transcript, "--exe", str(WHISPER_CLI),
+            "--work", work,
+        ], timeout=1800)
+    except subprocess.CalledProcessError as e:
+        log(f"[Whisper] 转写失败 (exit={e.returncode})，跳过转写步骤")
+    except subprocess.TimeoutExpired:
+        log("[Whisper] 转写超时（>30分钟），已终止进程")
+    else:
+        with open(transcript, encoding="utf-8") as f:
+            raw = f.read()
+        simp = _to_simplified(raw)
+        if simp != raw:
+            transcript_sc = os.path.join(outdir, "transcript_simplified.txt")
+            with open(transcript_sc, "w", encoding="utf-8") as f:
+                f.write(simp)
+            log(f"已生成简体副本: {transcript_sc}")
+        log(f"转写已存: {transcript}  ({os.path.getsize(transcript)} bytes)")
+        # 生成带时间戳的 TXT
+        _srt = os.path.join(outdir, "subtitle.srt")
+        if os.path.exists(_srt):
+            try:
+                # 视频号用描述/作者作为命名主题（无描述时回退 video）
+                _sph_title = safe_slug(desc) or safe_slug(author) or "video"
+                generate_timestamped_txt(outdir, _sph_title)
+            except Exception as e:
+                log(f"[时间戳TXT] 生成失败: {e}")
+
+    meta = {
+        "type": "sph_video", "url": url, "author": author,
+        "description": desc, "video_url": video_url,
+        "files": {"video": mp4, "transcript": transcript},
+    }
+    with open(os.path.join(outdir, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    # 安全收尾：清空运行时 config.yaml 明文 sphCookie（已注入 exe 内存，不影响后续）
+    try:
+        _clear_sph_cookie_in_config()
+    except Exception:
+        pass
+
+    return meta
+
 
 
 # ==================== 微信公众号 ====================
@@ -1121,8 +1278,20 @@ def download_vimeo_ffmpeg(url: str, vid: str, outdir: Path) -> Path:
         raise ValueError(f"Vimeo 下载失败: {e}")
 
 
-def transcribe_whisper(video_path: Path, outdir: Path, model: str = "small", lang: str = "zh", denoise: bool = False, title: str = "transcript") -> str:
+def transcribe_whisper(video_path: Path, outdir: Path, model: str = "small", lang: str = "zh", denoise: bool = False, title: str = "transcript", vocal_sep: bool = False, threads: Optional[int] = None, prompt: Optional[str] = None) -> str:
     log(f"[Whisper] 转写中 ({model}, {lang})...")
+    # 人声分离前处理（唱歌/带BGM 场景）：先分离人声再转写，显著降低乱码
+    src_for_transcribe = video_path
+    if vocal_sep and scene_audio.vocal_sep_available():
+        try:
+            if scene_audio.audio_has_music_or_singing(str(video_path)):
+                log("[增强] 检测到音乐/唱歌，执行人声分离前处理...")
+                vocals = scene_audio.separate_vocals(str(video_path), outdir)
+                if vocals:
+                    src_for_transcribe = Path(vocals)
+                    log(f"[增强] 改用分离人声轨转写: {vocals}")
+        except Exception as e:
+            log(f"[增强] 人声分离跳过（回退原轨）: {e}")
     work = WHISPER_WORK / video_path.stem
     # raw.txt 按主题命名（避免与 {title}_raw.txt 重复）；
     # subtitle.srt 保持固定名，generate_timestamped_txt 依赖它
@@ -1131,7 +1300,7 @@ def transcribe_whisper(video_path: Path, outdir: Path, model: str = "small", lan
     try:
         cmd = [
             PY, str(WHISPER_DIR / "scripts" / "transcribe.py"),
-            str(video_path),
+            str(src_for_transcribe),
             "--model", model, "--lang", lang,
             "--out", str(transcript),
             "--out-srt", str(srt_path),
@@ -1140,6 +1309,10 @@ def transcribe_whisper(video_path: Path, outdir: Path, model: str = "small", lan
         ]
         if denoise:
             cmd.append("--denoise")
+        if threads:
+            cmd += ["--threads", str(threads)]
+        if prompt:
+            cmd += ["--prompt", prompt]
         _silent_check_call(cmd, timeout=600)
     except subprocess.CalledProcessError as e:
         log(f"[Whisper] 转写失败: {e}")
@@ -1169,6 +1342,201 @@ def _to_simplified(text: str) -> str:
     except ImportError:
         pass
     return "".join(TC2SC.get(ch, ch) for ch in text)
+
+
+# ============================================================
+# ============================================================
+# 术语替换（ASR 同音/近音错误修正，支持多领域自动检测）
+# ============================================================
+_SCRIPT_DIR = Path(__file__).parent
+_TERM_BUILTIN_DIR = _SCRIPT_DIR / "terminology"
+_TERM_CACHE: Dict[str, tuple] = {}  # {file_path: (mtime, {wrong: right, ...})}
+
+# 领域关键词表（弱信号，用于 fallback 检测）
+_DOMAIN_KEYWORDS: Dict[str, list] = {}
+# 领域 wrong-form 索引（强信号，直接匹配错误词）
+_DOMAIN_WRONG_FORMS: Dict[str, set] = {}
+# 领域检测阈值
+_DOMAIN_THRESHOLD = 2            # 长文本 (≥200字)
+_DOMAIN_THRESHOLD_SHORT = 1      # 短文本 (<200字)
+_SHORT_TEXT_LEN = 200
+
+
+def _init_domain_dicts():
+    """预加载所有领域词典的关键词和 wrong-form 索引。
+    关键词去重并过滤至 2+ 字；wrong-form 也过滤至 2+ 字避免单字误伤。"""
+    if _DOMAIN_KEYWORDS or _DOMAIN_WRONG_FORMS:
+        return
+    for fname in _TERM_BUILTIN_DIR.glob("*.json"):
+        stem = fname.stem
+        if stem == "common":
+            continue
+        try:
+            with open(fname, encoding="utf-8") as f:
+                data = json.load(f)
+            # 关键词：去重 + 2+ 字过滤
+            kws = data.get("keywords", [])
+            if kws:
+                _DOMAIN_KEYWORDS[stem] = list(dict.fromkeys(kw for kw in kws if len(kw) >= 2))
+            # wrong-form：从 replacements 的 key 提取，过滤 2+ 字
+            raw_repl = data.get("replacements", {})
+            wrongs = {k for k, v in raw_repl.items() if k != v and len(k) >= 2}
+            if wrongs:
+                _DOMAIN_WRONG_FORMS[stem] = wrongs
+        except Exception:
+            pass
+
+
+def _detect_domain(text: str) -> list:
+    """智能检测领域，两阶段策略：
+    1. 强信号：文本中出现任何领域的 wrong form → 该领域命中（最高置信度）
+    2. 弱信号：关键词匹配（短文本阈值1，长文本阈值2）
+    返回匹配的领域名列表（不含 common），支持多领域叠加。"""
+    _init_domain_dicts()
+    matched = set()
+    # Pass 1: wrong-form scan（最强信号 — wrong form 只可能来自该领域）
+    for domain, wrongs in _DOMAIN_WRONG_FORMS.items():
+        if any(wrong in text for wrong in wrongs):
+            matched.add(domain)
+    # Pass 2: keyword matching（回退策略）
+    threshold = _DOMAIN_THRESHOLD_SHORT if len(text) < _SHORT_TEXT_LEN else _DOMAIN_THRESHOLD
+    for domain, keywords in _DOMAIN_KEYWORDS.items():
+        if domain in matched:
+            continue
+        hits = sum(1 for kw in keywords if kw in text)
+        if hits >= threshold:
+            matched.add(domain)
+    return sorted(matched)
+
+
+def _load_dict(path: Path) -> Dict[str, str]:
+    """加载单个词典 JSON，返回 {错误词: 正确词}，按词长降序排列。
+    过滤自指条目和单字条目（单字替换极易误伤）。"""
+    if not path.exists():
+        return {}
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {}
+    cached = _TERM_CACHE.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        raw = data.get("replacements", {})
+        # 过滤自指 + 单字 + 按词长降序
+        replacements = {k: v for k, v in raw.items() if k != v and len(k) >= 2}
+        replacements = dict(sorted(replacements.items(), key=lambda x: -len(x[0])))
+        _TERM_CACHE[str(path)] = (mtime, replacements)
+        return replacements
+    except Exception as e:
+        log(f"[术语] 加载失败 {path.name}: {e}")
+        return {}
+
+
+def _load_terminology(text: str, term_path: Optional[str] = None) -> Dict[str, str]:
+    """加载术语词典，支持自动领域检测 + 手动指定。
+
+    加载策略：
+    1. common.json（always_load，始终加载）
+    2. 自动检测：根据文本关键词加载匹配领域的词典
+    3. --terms 手动指定：加载指定路径（覆盖自动检测）
+
+    多词典结果合并，冲突时后加载的覆盖前面的。
+    """
+    if term_path:
+        # 手动指定路径
+        p = Path(term_path)
+        if p.exists() and p.suffix == ".json":
+            return _load_dict(p)
+        log(f"[术语] 指定路径不存在或不是 JSON: {term_path}")
+        return {}
+
+    merged: Dict[str, str] = {}
+
+    # 1. common.json（始终加载）
+    common_path = _TERM_BUILTIN_DIR / "common.json"
+    common_repl = _load_dict(common_path)
+    if common_repl:
+        merged.update(common_repl)
+
+    # 2. 自动检测领域
+    domains = _detect_domain(text)
+    for domain in domains:
+        dp = _TERM_BUILTIN_DIR / f"{domain}.json"
+        d_repl = _load_dict(dp)
+        if d_repl:
+            merged.update(d_repl)
+
+    return merged
+
+
+# ---- 反向验证：替换后异常模式扫描（只告警不修改）----
+# 中文中不应连续出现的字（连续出现几乎必为 ASR 错误或替换副作用）
+_SANE_REPEAT_CHARS = "的是了在都有也都不"
+# 断裂词模式（仅含非重复字符组合，重复字符由上面的 repeat 检查覆盖）
+_SANE_BROKEN_WORDS = ["不的"]
+
+
+def _post_correction_sanity_check(text: str, count: int) -> list:
+    """替换后异常模式扫描（只告警不修改文本）。
+
+    检测两类异常：
+    1. 重复字符：中文中不应连续出现的字（如"的的""是是"）
+    2. 断裂词：标准中文中不应出现的组合（如"不的"应为"不是"或"不能"）
+
+    返回告警列表，为空表示无异常。不修改原文，仅作为安全网记录。
+    """
+    warnings = []
+    # 1. 异常重复字符
+    for ch in _SANE_REPEAT_CHARS:
+        if ch + ch in text:
+            warnings.append(f"重复字符「{ch}{ch}」")
+    # 2. 断裂词模式
+    for broken in _SANE_BROKEN_WORDS:
+        if broken in text:
+            warnings.append(f"断裂词「{broken}」")
+    return warnings
+
+
+def _apply_terminology(text: str, term_path: Optional[str] = None) -> tuple:
+    """应用术语替换修正 ASR 转写错误。
+    返回 (修正后文本, 替换次数, 检测到的领域列表)。
+    替换完成后执行反向验证扫描，异常模式记录到日志（不修改文本）。"""
+    if term_path:
+        # 手动指定路径模式
+        replacements = _load_terminology(text, term_path)
+        if not replacements:
+            return text, 0, []
+        count = 0
+        for wrong, right in replacements.items():
+            n = text.count(wrong)
+            if n > 0:
+                text = text.replace(wrong, right)
+                count += n
+        # 反向验证
+        warnings = _post_correction_sanity_check(text, count)
+        if warnings:
+            log(f"[术语] 反向验证告警: {'; '.join(warnings)}")
+        return text, count, []
+
+    # 自动检测模式：先检测领域，再加载并应用
+    domains = _detect_domain(text)
+    replacements = _load_terminology(text, term_path)
+    if not replacements:
+        return text, 0, domains
+    count = 0
+    for wrong, right in replacements.items():
+        n = text.count(wrong)
+        if n > 0:
+            text = text.replace(wrong, right)
+            count += n
+    # 反向验证
+    warnings = _post_correction_sanity_check(text, count)
+    if warnings:
+        log(f"[术语] 反向验证告警: {'; '.join(warnings)}")
+    return text, count, domains
 
 
 def _load_llm_config() -> Optional[Dict]:
@@ -1346,7 +1714,7 @@ def _derive_title(text: str, fallback: str = "transcript") -> str:
     """从转写内容提取一个契合主题的短标题（无 LLM 时的规则式兜底）。
     优先用 LLM 提取；无 LLM 则按高频实体词/关键场景词组合生成。"""
     cfg = _load_llm_config()
-    if cfg:
+    if cfg and USE_LLM:
         try:
             import httpx
             base = (cfg.get("base_url") or "https://api.openai.com/v1").rstrip("/")
@@ -1437,8 +1805,8 @@ def clean_transcript(text: str) -> str:
     # 繁体转简体（三级兜底，杜绝残留繁体）
     text = _to_simplified(text)
 
-    # 优先 LLM 智能整理（断句 + 标点 + 分段），失败则回退规则式
-    if len(text) >= 30:
+    # 优先 LLM 智能整理（断句 + 标点 + 分段），仅当 --llm 显式开启时
+    if USE_LLM and len(text) >= 30:
         llm_result = llm_segment_and_punctuate(text)
         if llm_result:
             return llm_result.strip()
@@ -1558,14 +1926,22 @@ def clean_transcript(text: str) -> str:
 
 
 def _load_srt_segments(outdir: Path) -> List[tuple]:
-    """解析 subtitle.srt，返回 [(start_ms, end_ms, text), ...]"""
+    """解析 SRT 字幕，返回 [(start_ms, end_ms, text), ...]
+    优先 subtitle.srt；不存在时回退 *_raw.srt（sph 视频号流程的产物名）。"""
     srt_path = outdir / "subtitle.srt"
+    if not srt_path.exists():
+        # 回退：sph 等流程生成 transcript_raw.srt / *_raw.srt
+        alt = sorted(outdir.glob("*_raw.srt")) or sorted(outdir.glob("*.srt"))
+        if alt:
+            srt_path = alt[0]
     if not srt_path.exists():
         return []
     try:
         content = srt_path.read_text(encoding="utf-8")
     except Exception:
         return []
+    # 先繁转简（Whisper 输出繁体时处理）
+    content = _to_simplified(content)
     ts_pattern = re.compile(r'(\d+):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d+):(\d{2}):(\d{2}),(\d{3})')
     segments, lines, i = [], content.split("\n"), 0
     while i < len(lines):
@@ -1719,11 +2095,136 @@ def _is_exclam(s: str) -> bool:
     return False
 
 
+# Global flags
+BILINGUAL_ENABLED = os.environ.get("BILINGUAL_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+USE_LLM = False  # Set by main() when --llm flag is passed
+_TRANSLATE_CACHE = {}
+
+
+def _translate_text(text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
+    """Translate text using available service. Returns translated text or original if translation fails.
+    
+    Priority:
+    1. LLM API if configured and BILINGUAL_ENABLED
+    2. MyMemory Translate (free, no key needed) with proxy bypass
+    3. deep_translator with proxy bypass (proxies={})
+    4. Return original text if all fail
+    """
+    if not text or not text.strip():
+        return text
+    key = f"{source_lang}|{target_lang}|{text}"
+    if key in _TRANSLATE_CACHE:
+        return _TRANSLATE_CACHE[key]
+    result = _translate_text_uncached(text, source_lang, target_lang)
+    _TRANSLATE_CACHE[key] = result
+    return result
+
+
+_translate_progress = {"count": 0}
+
+
+def _translate_text_uncached(text: str, source_lang: str = "auto", target_lang: str = "zh-CN") -> str:
+    if not text or not text.strip():
+        return text
+    
+    # Try LLM first if available (only when --llm explicitly enabled)
+    if USE_LLM and BILINGUAL_ENABLED:
+        cfg = _load_llm_config()
+        if cfg and text:
+            try:
+                import httpx
+                base = (cfg.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+                url = base + "/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {cfg['api_key']}",
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "model": cfg.get("model", "gpt-4o-mini"),
+                    "messages": [
+                        {"role": "system", "content": "You are a professional translator. Translate the following text to Chinese (Simplified). Output ONLY the translation, nothing else."},
+                        {"role": "user", "content": text}
+                    ],
+                    "temperature": 0.3,
+                }
+                import json as _json
+                resp = httpx.post(url, headers=headers, json=payload, timeout=30)
+                if resp.status_code == 200:
+                    result = resp.json()["choices"][0]["message"]["content"].strip()
+                    if result and len(result) > 1:
+                        return result
+            except Exception as e:
+                log(f"[翻译] LLM失败: {e}")
+    
+    # Try MyMemory Translate (free, no key, supports Chinese)
+    try:
+        import requests
+        url = "https://api.mymemory.translated.net/get"
+        src = source_lang if source_lang != "auto" else "en"
+        tgt = target_lang.replace("zh-CN", "zh").replace("en-US", "en")
+        langpair = f"{src}|{tgt}"
+        params = {"q": text, "langpair": langpair}
+        resp = requests.get(url, params=params, timeout=5, headers={"User-Agent": "Mozilla/5.0"}, proxies={"http": None, "https": None})
+        if resp.status_code == 200:
+            result = resp.json().get("responseData", {}).get("translatedText", "")
+            if result and len(result) > 1 and "INVALID" not in result.upper() and "ERROR" not in result.upper():
+                return result
+    except Exception as e:
+        log(f"[翻译] MyMemory失败: {e}")
+    
+    return text
+
+
+def _is_english_text(s: str) -> bool:
+    """Check if text is primarily English (contains significant Latin characters)."""
+    if not s:
+        return False
+    # Count Latin characters vs CJK
+    latin_count = sum(1 for c in s if c.isascii() and c.isalpha())
+    cjk_count = sum(1 for c in s if '\u4e00' <= c <= '\u9fff')
+    total_alpha = latin_count + cjk_count
+    if total_alpha == 0:
+        return False
+    return latin_count / total_alpha > 0.5
+
+
+def _split_mixed_lines(text: str) -> List[tuple]:
+    """Split text into (original, translated) pairs.
+    Returns list of tuples: (original_text, chinese_translation_or_empty)
+    """
+    lines = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            lines.append((line, ''))
+            continue
+        
+        # Check if line is primarily English
+        if _is_english_text(line):
+            translated = _translate_text(line)
+            lines.append((line, translated))
+        else:
+            # Pure Chinese or mixed: keep original
+            lines.append((line, ''))
+    
+    return lines
+
+
+def _is_cjk_text(s: str) -> bool:
+    """是否含中文字符（决定是否走中文标点规则）。
+    英文等拉丁文本应保留原标点，不能被中文标点规则改写。"""
+    return any('\u4e00' <= c <= '\u9fff' for c in (s or ""))
+
+
 def _punctuate_sentence(s: str) -> str:
-    """按语境补全标点：句内逗号/顿号 + 称呼逗号 + 句末。？！"""
+    """按语境补全标点：句内逗号/顿号 + 称呼逗号 + 句末。？！
+    仅对含中文的文本生效；纯英文/拉丁文本原样返回（保留英文标点与空格）。"""
     s = (s or "").strip()
     if not s:
         return ""
+    # 非中文文本：不做中文标点化，避免空格被误替换为中文逗号
+    if not _is_cjk_text(s):
+        return s
     if s[-1] in "。！？.!?":
         return _fix_inner_punct(s)
     s = _fix_inner_punct(s)
@@ -1764,14 +2265,315 @@ def _split_into_chapters(segments: List[tuple], gap_ms: int = 8000,
     return merged
 
 
-def _build_script_chapters(text: str, outdir: Path) -> List[Dict]:
+# ============================================================
+# 语义章节划分（v1.3.5+）：TextTiling 词汇相似度 + 时间停顿 → 两级层次
+# ============================================================
+
+# 语义切分停用词（虚词/代词/副词——不携带话题信息）
+_SEM_STOPWORDS: frozenset = frozenset({
+    '我们', '你们', '他们', '咱们', '这个', '那个', '这些', '那些', '这样', '那样',
+    '一个', '两个', '几个', '什么', '怎么', '为什么', '哪里', '哪个', '哪些',
+    '的话', '是吧', '对吧', '好吧', '然后', '但是', '所以', '因为', '如果',
+    '还有', '或者', '而且', '不过', '其实', '反正', '就是',
+    '非常', '特别', '特别大', '有点', '一点', '一些', '一下', '一直', '已经',
+    '现在', '当时', '一会', '一会儿', '等会', '马上', '直接', '肯定',
+    '可能', '应该', '必须', '需要', '进行', '开始', '情况', '样子', '模样',
+    '地方', '时候', '玩意', '知道', '觉得', '感觉', '认为', '发现', '看到',
+    '东西', '问题', '一模一样', '百分之百', '不容易', '搞的', '弄的',
+})
+
+# 有效 POS：名词类 + 动词类 + 英文（携带话题信息）
+_SEM_POS = ('n', 'nr', 'ns', 'nt', 'nz', 'vn', 'v', 'eng')
+
+# 报错代码 → 归一化实体
+_ERROR_CODES = frozenset({'C0', 'C1', 'A0', 'A1', 'B0', 'B1', 'C0C1', 'C1C0'})
+
+# 动词 → 名词化动作映射（用于概括标题）
+_VERB_NOMINAL = {
+    '测': '测试', '跑': '测试', '试': '测试', '测试': '测试', '检测': '测试',
+    '换': '更换', '更换': '更换', '替换': '更换',
+    '修': '维修', '维修': '维修', '焊': '焊接', '焊接': '焊接', '吹': '焊接',
+    '看': '检查', '检查': '检查', '查': '检查', '观察': '检查',
+    '拆': '拆解', '抠': '拆解', '拆机': '拆解',
+    '装': '组装', '组装': '组装', '装机': '组装',
+    '分析': '分析', '判断': '判断', '排查': '排查', '确认': '确认',
+    '翻新': '翻新', '清理': '清理',
+}
+
+# 结果标记词 → 标题后缀
+_RESULT_MARKERS = [
+    (('白瞎', '失败', '一模一样', '白费', '判死刑'), '失败'),
+    (('搞定', '完美', '上岸', '不容易', '应该是搞定了'), '搞定'),
+]
+
+# 故障现象词（单实体标题时补充"故障"单元）
+_FAULT_WORDS = ('挂了', '坏了', '不亮', '死机', '花屏', '黑屏', '报错', '故障')
+
+# 标题弱词黑名单（跨领域词典混入的泛化词，不进标题）
+_TITLE_WEAK_WORDS = frozenset({
+    '代表', '象征', '标志', '方面', '角度', '内容', '形式', '形态',
+    '单位', '部门', '领域', '范围', '程度', '过程', '阶段', '环境',
+})
+
+# 领域实体集缓存（从术语词典 keywords 动态合并，跨领域通用）
+_DOMAIN_ENTITY_CACHE: Optional[frozenset] = None
+
+
+def _domain_entity_set() -> frozenset:
+    """合并所有领域词典的 keywords 作为章节标题的领域实体加权表。"""
+    global _DOMAIN_ENTITY_CACHE
+    if _DOMAIN_ENTITY_CACHE is None:
+        ents = set()
+        try:
+            _init_domain_dicts()
+            for kws in _DOMAIN_KEYWORDS.values():
+                ents.update(kws)
+        except Exception:
+            pass
+        _DOMAIN_ENTITY_CACHE = frozenset(ents)
+    return _DOMAIN_ENTITY_CACHE
+
+
+def _sem_seg_words(sent: str) -> list:
+    """句子分词，保留携带话题信息的词（用于相似度计算）"""
+    try:
+        import jieba.posseg as pseg
+        return [w for w, flag in pseg.cut(sent)
+                if len(w) >= 2 and flag in _SEM_POS and w not in _SEM_STOPWORDS]
+    except Exception:
+        return [w for w in re.split(r'\s+', sent) if len(w) >= 2]
+
+
+def _detect_boundaries(segments: List[tuple], win: int = 3) -> list:
+    """相邻窗口词汇相似度（Jaccard）+ 时间停顿加成 → 每个句间位置的边界强度 [0,1]"""
+    n = len(segments)
+    words = [_sem_seg_words(t) for _, _, t in segments]
+    scores = []
+    for i in range(1, n):
+        left = [w for ws in words[max(0, i - win):i] for w in ws]
+        right = [w for ws in words[i:i + win] for w in ws]
+        if not left or not right:
+            sim = 0.0
+        else:
+            ls, rs = set(left), set(right)
+            sim = len(ls & rs) / len(ls | rs)
+        time_gap = segments[i][0] - segments[i - 1][1]
+        time_boost = min(1.0, time_gap / 6000) * 0.4 if time_gap > 3000 else 0.0
+        scores.append(1.0 - sim + time_boost)
+    if not scores:
+        return []
+    mx = max(scores) or 1.0
+    return [s / mx for s in scores]
+
+
+def _semantic_chapters(segments: List[tuple], min_sents: int = 20,
+                       max_sents: int = 60, target_chapters=None) -> List[Dict]:
+    """自适应语义切分（核心章节版）：按边界分数选 top-N 强边界（间距≥min_sents）→
+    少量一级核心章节；仅超长章节（>45 句）才细分二级小节。
+    返回 [{"level", "range", "start_ms", "end_ms"}, ...] 顺序混排。"""
+    n = len(segments)
+    if n == 0:
+        return []
+    bscores = _detect_boundaries(segments)
+
+    # 自适应强边界数量：约每 40 句一章（核心章节，方便快速查看重点）
+    if target_chapters is None:
+        target_chapters = max(3, round(n / 40))
+    cands = sorted(range(1, n), key=lambda i: -bscores[i - 1])
+    picked = []
+    for i in cands:
+        if len(picked) >= target_chapters:
+            break
+        if all(abs(i - p) >= min_sents for p in picked):
+            picked.append(i)
+    picked.sort()
+    bounds = [0] + picked + [n]
+    # 尾章过短则并入前章
+    if len(bounds) > 2 and n - bounds[-2] < min_sents // 2:
+        bounds.pop(-2)
+
+    result = []
+    for ci in range(len(bounds) - 1):
+        s, e = bounds[ci], bounds[ci + 1]
+        # 二级小节：仅超长章节（>45 句）细分，最多 3 个小节
+        if e - s > 45:
+            sub_cands = sorted((i for i in range(s + 1, e)), key=lambda i: -bscores[i - 1])
+            sub_picked = []
+            want = min(3, max(2, (e - s) // 22))  # 每小节约22句，至多3个
+            for i in sub_cands:
+                if len(sub_picked) >= want - 1:
+                    break
+                if all(abs(i - p) >= 10 for p in sub_picked) and i - s >= 8 and e - i >= 8:
+                    sub_picked.append(i)
+            sub_picked.sort()
+            sub_bounds = [s] + sub_picked + [e]
+            for si in range(len(sub_bounds) - 1):
+                ss, se = sub_bounds[si], sub_bounds[si + 1]
+                result.append({"level": 1 if si == 0 else 2, "range": (ss, se),
+                               "start_ms": segments[ss][0], "end_ms": segments[se - 1][1]})
+        else:
+            result.append({"level": 1, "range": (s, e),
+                           "start_ms": segments[s][0], "end_ms": segments[e - 1][1]})
+
+    # 超长兜底拆分
+    final = []
+    for ch in result:
+        s, e = ch["range"]
+        if e - s > max_sents:
+            for k in range(s, e, max_sents):
+                ke = min(k + max_sents, e)
+                final.append({**ch, "range": (k, ke),
+                              "start_ms": segments[k][0], "end_ms": segments[ke - 1][1],
+                              "level": 1 if k == s else ch["level"]})
+        else:
+            final.append(ch)
+    # 尾段碎片（<5句）并回前一段
+    if len(final) >= 2:
+        s, e = final[-1]["range"]
+        if e - s < 5:
+            prev = final[-2]
+            ps, _ = prev["range"]
+            final[-2] = {**prev, "range": (ps, e), "end_ms": final[-1]["end_ms"]}
+            final.pop()
+    return final
+
+
+def _chapter_summary_title(segments: List[tuple], s: int, e: int,
+                           domain_ents: frozenset) -> str:
+    """动作+实体组合概括标题（规则式）：如「显存更换与报错测试·失败」+ 时间戳前缀"""
+    from collections import Counter
+    text = ' '.join(t for _, _, t in segments[s:e])
+
+    # 结果后缀检测
+    result_suffix = ''
+    for marker_words, suffix in _RESULT_MARKERS:
+        if any(mw in text for mw in marker_words):
+            result_suffix = suffix
+            break
+
+    # (动作, 实体) 共现统计：句内×3，跨句借用×1
+    pairs: Counter = Counter()
+    ent_freq: Counter = Counter()
+    act_freq: Counter = Counter()
+    last_ents: list = []
+    try:
+        import jieba.posseg as pseg
+        for sent in text.split(' '):
+            cur_acts, cur_ents = [], []
+            for w, flag in pseg.cut(sent):
+                if w in _SEM_STOPWORDS:
+                    continue
+                if w in _ERROR_CODES:
+                    w = '报错'
+                if flag in ('v', 'vn'):
+                    base = w.rstrip('过了着')
+                    act = _VERB_NOMINAL.get(w) or _VERB_NOMINAL.get(base)
+                    if act:
+                        cur_acts.append(act)
+                    continue
+                if (flag in ('n', 'nr', 'ns', 'nt', 'nz', 'eng')
+                        and w in domain_ents and len(w) >= 2
+                        and w not in _TITLE_WEAK_WORDS):
+                    cur_ents.append(w)
+                    ent_freq[w] += 3
+            pair_ents = cur_ents or last_ents
+            borrow_wgt = 3 if cur_ents else 1
+            for a in set(cur_acts):
+                act_freq[a] += 1
+                for ent in pair_ents:
+                    pairs[(a, ent)] += borrow_wgt
+            if cur_ents:
+                last_ents = cur_ents
+    except Exception:
+        pass
+
+    # 标题拼装：动作-实体组合优先（动作/实体均去重）
+    segs: list = []
+    used_acts, used_ents = set(), set()
+    for (act, ent), _ in pairs.most_common(12):
+        if act in used_acts or ent in used_ents:
+            continue
+        if len(segs) >= 2:
+            break
+        segs.append(f"{ent}{act}")
+        used_acts.add(act)
+        used_ents.add(ent)
+
+    # fallback：领域实体组合 → 动作词兜底 → 首句截断
+    if not segs:
+        segs = [w for w, _ in ent_freq.most_common(10)
+                if w in domain_ents and w not in used_ents][:2]
+    elif len(segs) == 1:
+        extra = [w for w, _ in ent_freq.most_common(10)
+                 if w in domain_ents and w not in used_ents]
+        if extra:
+            segs.append(extra[0])
+    if not segs and act_freq:
+        # 无实体时用高频动作词（测试/更换/焊接...）作标题元素
+        segs = [a for a, _ in act_freq.most_common(2)]
+    if not segs:
+        # 终极兜底：取该章第一句前10字
+        first = re.split(r'[。！？\n，]', text.strip())
+        first = first[0].strip() if first else ''
+        if first:
+            segs = [first[:10] + ('…' if len(first) > 10 else '')]
+
+    # 单实体 + 故障现象 → 补"故障"
+    if len(segs) == 1 and not result_suffix:
+        if any(fw in text for fw in _FAULT_WORDS):
+            segs.append('故障')
+
+    title = '与'.join(segs) if segs else ''
+    if result_suffix and title:
+        title = f"{title}·{result_suffix}"
+
+    start_s = segments[s][0] // 1000
+    ts = f"{start_s // 60:02d}:{start_s % 60:02d}"
+    return f"[{ts}] {title}" if title else f"[{ts}]"
+
+
+def _ms_to_ts(ms: int) -> str:
+    """毫秒转 mm:ss（音频事件标记用）"""
+    s = ms // 1000
+    return f"{s // 60:02d}:{s % 60:02d}"
+
+
+def _split_by_boundaries(segments, scenes):
+    """按转场边界(scenes, [ms,...])把 SRT segments 切成章节组 [[text,...],...]。"""
+    bounds = sorted(b for b in (scenes or []) if b > 0)
+    if not bounds:
+        return []
+    groups, cur = [], []
+    bidx = 0
+    for start, end, text in segments:
+        while bidx < len(bounds) and start >= bounds[bidx]:
+            if cur:
+                groups.append(cur)
+                cur = []
+            bidx += 1
+        cur.append(text)
+    if cur:
+        groups.append(cur)
+    # 合并过碎的组（<12 句且非唯一）
+    merged = []
+    for g in groups:
+        if merged and len(g) < 12:
+            merged[-1].extend(g)
+        else:
+            merged.append(g)
+    return merged
+
+
+def _build_script_chapters(text: str, outdir: Path, scenes=None) -> List[Dict]:
     """构建"脚本化"章节结构：[{"title": 章节标题, "paragraphs": [段落...]}, ...]
 
     - 优先用 LLM 输出带章节小标题的 Markdown（解析成结构化数据）
     - 无 LLM 时用 SRT 时间间隔划分场景，标题为「场景 N」
     """
-    # 1) LLM 优先：让模型直接给出带 ## 章节的完整脚本
-    llm_md = llm_script(text)
+    # 1) LLM 优先：让模型直接给出带 ## 章节的完整脚本（仅当 --llm 显式开启时）
+    llm_md = None
+    if USE_LLM:
+        llm_md = llm_script(text)
     if llm_md:
         chapters, cur = [], None
         for line in llm_md.split("\n"):
@@ -1789,24 +2591,48 @@ def _build_script_chapters(text: str, outdir: Path) -> List[Dict]:
         if chapters:
             return chapters
 
-    # 2) 规则式：用 SRT 间隔划场景，逐句补标点
+    # 2) 规则式：优先语义切分（词汇相似度+时间停顿，两级层次），无 SRT 时回退句数切分
     segments = _load_srt_segments(outdir)
-    groups = _split_into_chapters(segments)
-    if not groups:
-        # 无 SRT：整篇按句数切分
-        sents = [s.strip() for s in re.split(r'[。！？\n]', text) if s.strip()]
-        groups = [sents[i:i + 10] for i in range(0, len(sents), 10)] or []
+    if segments:
+        sem_chs = _semantic_chapters(segments)
+        domain_ents = _domain_entity_set()
+        chapters = []
+        for ch in sem_chs:
+            s, e = ch["range"]
+            group = [t for _, _, t in segments[s:e]]
+            # 中文用无空格连接；英文等拉丁文本用空格连接（避免 "day.Many" 粘连）
+            sep = "" if _is_cjk_text(" ".join(group)) else " "
+            paras, buf = [], []
+            for sent in group:
+                buf.append(_punctuate_sentence(sent))
+                if len(buf) >= 4:          # 每 4 句一段
+                    paras.append(sep.join(buf))
+                    buf = []
+            if buf:
+                paras.append(sep.join(buf))
+            if paras:
+                ttl = _chapter_summary_title(segments, s, e, domain_ents)
+                chapters.append({"title": ttl, "paragraphs": paras,
+                                 "level": ch["level"]})
+        if chapters:
+            return chapters
+
+    # 回退：无 SRT 时整篇按句数切分
+    sents = [s.strip() for s in re.split(r'[。！？\n]', text) if s.strip()]
+    groups = [sents[i:i + 10] for i in range(0, len(sents), 10)] or []
 
     chapters = []
     for i, group in enumerate(groups, 1):
+        # 中文用无空格连接；英文等拉丁文本用空格连接（避免 "day.Many" 粘连）
+        sep = "" if _is_cjk_text(" ".join(group)) else " "
         paras, buf = [], []
         for s in group:
             buf.append(_punctuate_sentence(s))
             if len(buf) >= 4:          # 每 4 句一段
-                paras.append("".join(buf))
+                paras.append(sep.join(buf))
                 buf = []
         if buf:
-            paras.append("".join(buf))
+            paras.append(sep.join(buf))
         if paras:
             kw = _chapter_keyword("".join(group))
             ttl = f"场景 {i}" + (f" · {kw}" if kw else "")
@@ -1814,26 +2640,229 @@ def _build_script_chapters(text: str, outdir: Path) -> List[Dict]:
     return chapters
 
 
-def _chapter_keyword(text: str) -> str:
-    """提取章节的实体关键词（人名/地名/机构/专名），用于生成章节小标题。"""
-    try:
-        import logging
-        import jieba
-        import jieba.posseg as pseg
-        jieba.setLogLevel(logging.ERROR)
+# 章节标题停用词：品牌名/通用词/描述词/拟声词/无意义高频词
+_CHAPTER_STOPWORDS: frozenset = frozenset({
+    # 品牌/产品名
+    '戴尔', '三星', '外星人', '联想', '惠普', '华硕', '微星', '技嘉',
+    '七彩虹', '影驰', '昂达', '铭瑄', '双敏', '艾尔莎', '耕升', '盈通',
+    '斯巴达克', '磐正', '拯救者', '机械革命', '雷神', '神舟',
+    'RTX', 'GTX', 'NVIDIA', 'AMD', 'Intel',
+    # 通用代词/量词
+    '东西', '这个', '那个', '一些', '什么', '怎么', '如何', '为什么',
+    '哪里', '哪个', '哪些', '这么', '那么', '这些', '那些',
+    '一个', '两个', '几个', '多少', '所有', '全部', '任何', '每个',
+    '大家', '有人', '没人', '咱们', '你们', '他们', '我们',
+    # 描述性副词/形容词
+    '非常', '特别', '十分', '极其', '更加', '比较', '挺', '算',
+    '明显', '清楚', '简单', '复杂', '重要', '关键', '主要', '次要',
+    '可能', '大概', '或许', '也许', '一定', '肯定', '必须', '应该',
+    '已经', '还在', '正在', '还是', '就是', '不过', '但是',
+    '非常明显', '非常脆弱', '非常关键', '非常简单', '非常重要',
+    '太贵', '太便宜', '太贵了', '非常好', '非常差',
+    '不容易', '很容易', '不太行', '不太对',
+    # 过于通用的名词
+    '机器', '模式', '代表', '样子', '模样', '方式', '情况',
+    '问题', '结果', '原因', '条件', '机会', '作用', '影响',
+    '通讯', '交流', '沟通', '联系', '互动', '反馈', '信息',
+    '工作', '任务', '项目', '计划', '方案', '措施',
+    '时候', '时间', '地方', '过程', '方法',
+    # 通用动词
+    '测试', '检查', '确认', '发现', '开始', '结束', '完成', '继续',
+    '知道', '觉得', '感觉', '认为', '希望', '需要', '想要', '打算',
+    # 拟声词/语气词
+    '滋滋', '嗡嗡', '哗哗', '咚咚', '砰砰', '咔咔', '嘀嘀', '啦啦',
+    '嗯', '啊', '呢', '吧', '吗', '哦', '呀', '哇', '哎', '嘿',
+    '妈', '妈呀', '哎呀', '天哪', '我的天', '个蛋', '白瞎',
+    # 无意义高频词
+    '全都', '都是', '都有', '那个那个', '这个这个', '就是就是',
+    '线存', '包错', '搞的', '搞成像',
+    '称荒', '称恐', '称荒称恐',
+})
 
-        freq: Dict[str, int] = {}
-        for w, flag in pseg.cut(text):
-            if len(w) >= 2 and flag in ("nr", "ns", "nt", "nz"):
-                freq[w] = freq.get(w, 0) + 1
-        if freq:
-            return sorted(freq.items(), key=lambda kv: -kv[1])[0][0]
+# 通用词黑名单：这些词在标题中永远没有意义
+_CHAPTER_GENERIC_BLACKLIST: frozenset = frozenset({
+    '机器', '设备', '系统', '功能', '性能', '配置',
+    '型号', '版本', '更新', '升级', '下载', '安装',
+    '文件', '文档', '程序', '软件', '应用',
+    '页面', '网站', '平台', '服务', '数据',
+    '内容', '信息', '消息', '通知', '提示',
+    '设置', '选项', '菜单', '按钮', '链接',
+    '用户', '客户', '朋友', '同学', '老师',
+    '今天', '明天', '昨天', '现在', '以后', '以前',
+    '之前', '之后', '刚才', '马上', '立刻',
+    '这样', '那样', '这边', '那边', '这里', '那里',
+    '自己', '别人', '大家', '所有人',
+    '东西', '事物', '事情', '方面', '角度',
+    '方法', '方式', '途径', '手段', '工具',
+    '原因', '结果', '目的', '意义', '价值',
+    '时间', '空间', '地方', '位置', '范围',
+    '程度', '比例', '数量', '规模', '水平',
+    '变化', '改变', '调整', '修改', '变更',
+    '情况', '状况', '状态', '形势', '趋势',
+    '问题', '困难', '挑战', '风险', '机遇',
+    '条件', '环境', '背景', '因素', '要素',
+    '环节', '步骤', '流程', '过程', '阶段', '时期',
+    '方面', '角度', '层面', '维度', '方向',
+    '模式', '类型', '类别', '种类', '品种',
+    '代表', '象征', '标志', '特征', '特点',
+    '意义', '目的', '目标', '宗旨', '原则',
+    '要求', '标准', '规范', '规则', '制度',
+    '政策', '方针', '策略', '方法', '措施',
+    '效果', '作用', '影响', '结果', '后果',
+    '原因', '起因', '缘由', '问题', '难题',
+    '测试', '试验', '实验', '验证', '检验',
+    '检查', '检测', '确认', '核实', '发现',
+    '开始', '启动', '结束', '完成', '继续',
+    '知道', '了解', '觉得', '感觉', '认为',
+    '希望', '想要', '需要', '必须', '打算',
+    '可以', '能够', '应该', '已经', '正在',
+    '还是', '就是', '不过', '但是',
+})
+
+
+# 填充词：转写文本中的口语填充，清洗标题时去除
+_FILLER_WORDS: frozenset = frozenset({
+    '呃', '啊', '嗯', '哦', '唉', '哎', '嘿', '嗨',
+    '那个', '这个', '就是', '然后', '其实', '其实呢',
+    '对吧', '是吧', '好吧', '好啦', '好了',
+    '你看', '你看啊', '你看这个', '你看那个',
+    '我说', '你知道吗', '你知道吗', '知道吧',
+    '反正', '反正呢', '其实吧', '说实话',
+    '所以说', '所以说啊', '所以说呢',
+    '怎么说呢', '怎么说呢', '怎么讲呢',
+    '的话', '呢', '吧', '吗', '啊',
+    '咱们', '咱们就', '咱们就', '咱们这',
+    '那么', '那么呢', '那么这', '那么这',
+    '这个呢', '那个呢', '这样呢', '那样呢',
+})
+
+# 代词/无意义开头：标题中不携带信息
+_PRONOUN_PREFIXES: tuple = ('我', '你', '他', '她', '它', '我们', '你们', '他们', '咱们',
+    '这个', '那个', '这些', '那些', '这样', '那样', '这么', '那么',
+    '所以', '但是', '不过', '然后', '接着', '后来', '现在', '以后', '以前',
+    '首先', '其次', '最后', '另外', '还有', '再说', '再说呢',
+    '其实', '其实呢', '其实吧', '说实话', '说白了',
+    '你看', '你看啊', '你看这个', '你看那个',
+    '你看这', '你看那', '你看这', '你看那',
+    '我觉得', '我感觉', '我认为', '我估计', '我估计呢',
+    '说实话', '说白了', '说白了', '说白了吧',
+)
+
+
+def _clean_sentence(sent: str) -> str:
+    """清洗句子：去除填充词、代词前缀、多余空格，返回干净的主题句。"""
+    import re
+    # 去除填充词
+    for filler in _FILLER_WORDS:
+        sent = sent.replace(filler, ' ')
+    # 去除代词前缀（开头）
+    for prefix in _PRONOUN_PREFIXES:
+        if sent.startswith(prefix):
+            sent = sent[len(prefix):]
+    # 去除多余空格
+    sent = re.sub(r'\s+', ' ', sent).strip()
+    # 去除首尾标点
+    sent = sent.strip('，。！？；：、,.!?;:')
+    return sent
+
+
+def _sentence_score(sent: str) -> float:
+    """给句子打分：越短越好、名词越多越好、含领域词越好。"""
+    if not sent:
+        return 0.0
+    score = 0.0
+    # 长度分：8-20字最优，太短/太长扣分
+    length = len(sent)
+    if 8 <= length <= 20:
+        score += 3.0
+    elif 5 <= length < 8:
+        score += 1.5
+    elif 20 < length <= 30:
+        score += 1.0
+    elif length > 30:
+        score += 0.3
+    else:
+        score += 0.5
+    # 名词密度分：名词越多越 informative
+    try:
+        import jieba.posseg as pseg
+        nouns = 0
+        verbs = 0
+        total = 0
+        for w, flag in pseg.cut(sent):
+            if len(w) >= 2:
+                total += 1
+                if flag in ('n', 'nr', 'ns', 'nt', 'nz', 'vn', 'an'):
+                    nouns += 1
+                elif flag in ('v', 'vd', 'vi'):
+                    verbs += 1
+        if total > 0:
+            score += (nouns / total) * 4.0
+            score += (verbs / total) * 2.0
     except Exception:
         pass
-    return ""
+    # 领域词加分：包含硬件维修相关词汇
+    domain_words = {'显卡', '显存', '主板', '散热', '硅脂', '风枪', 'BGA', '焊接',
+        '花屏', '黑屏', '死机', '组装机', '二手', '笔记本', '维修', '板卡',
+        '颗粒', '焊油', '虚焊', '芯片组', '供电', '插槽', '散热器', '核心',
+        '内存', '板载', '硬盘', '屏幕', '摄像头', '电池', '驱动', '螺丝',
+        '外壳', '标签', '翻新', '洋垃圾', '胶', '桥片', '导热',
+        '报错', '通道', '颗粒', '焊台', '加热', '拆机', '检测',
+        'CPU', 'GPU', 'BIOS', 'RTX', 'GTX', 'i9', 'i7',
+    }
+    for word in domain_words:
+        if word in sent:
+            score += 2.0
+            break
+    return score
 
 
-def generate_markdown(text: str, title: str, outdir: Path) -> Path:
+def _chapter_keyword(text: str) -> str:
+    """生成章节要点概述句作为标题。
+
+    策略：
+    1. 将章节文本按句号/问号/感叹号切分为句子
+    2. 清洗每个句子（去除填充词、代词前缀）
+    3. 给每个句子打分（长度、名词密度、领域词）
+    4. 取最高分的句子作为标题
+    5. 如果最高分句子太短（<6字），取第二高分的句子拼接
+    6. 最终截取12-15字
+    """
+    import re
+    # 按句号/问号/感叹号切分句子
+    sentences = [s.strip() for s in re.split(r'[。！？\n]', text) if s.strip()]
+    if not sentences:
+        return ''
+
+    # 清洗每个句子
+    cleaned = []
+    for sent in sentences:
+        c = _clean_sentence(sent)
+        if c and len(c) >= 4:  # 过滤太短的句子
+            cleaned.append(c)
+    if not cleaned:
+        return ''
+
+    # 给每个句子打分
+    scored = [(sent, _sentence_score(sent)) for sent in cleaned]
+    scored.sort(key=lambda x: -x[1])
+
+    # 取最高分的句子
+    best = scored[0][0]
+    # 如果太短，尝试拼接第二高分的句子
+    if len(best) < 6 and len(scored) > 1:
+        best = best + ' ' + scored[1][0]
+
+    # 截取12-15字
+    if len(best) > 15:
+        best = best[:15] + '…'
+    elif len(best) > 12:
+        best = best[:12] + '…'
+
+    return best
+
+
+def generate_markdown(text: str, title: str, outdir: Path, scenes=None, audio_events=None, ocr_results=None) -> Path:
     """将转写文本生成为 Markdown 文件（脚本化：分章节 + 段落）"""
     base = safe_slug(title) or "transcript"
     md_path = outdir / f"{base}.md"
@@ -1847,13 +2876,19 @@ def generate_markdown(text: str, title: str, outdir: Path) -> Path:
     lines.append("---")
     lines.append("")
 
-    chapters = _build_script_chapters(text, outdir)
+    chapters = _build_script_chapters(text, outdir, scenes=scenes)
     if chapters:
         for ch in chapters:
-            lines.append(f"## {ch['title']}")
+            prefix = "##" if ch.get("level", 1) == 1 else "###"
+            lines.append(f"{prefix} {ch['title']}")
             lines.append("")
             for para in ch["paragraphs"]:
                 lines.append(para)
+                # Bilingual: add Chinese translation after English
+                if BILINGUAL_ENABLED and _is_english_text(para):
+                    translated = _translate_text(para)
+                    if translated != para:
+                        lines.append(f"\n**中文翻译：** {translated}")
                 lines.append("")
     else:
         # 兜底：用清洗后的段落文本
@@ -1861,19 +2896,65 @@ def generate_markdown(text: str, title: str, outdir: Path) -> Path:
             line = line.strip()
             if line:
                 lines.append(line)
+                # Bilingual: add Chinese translation after English
+                if BILINGUAL_ENABLED and _is_english_text(line):
+                    translated = _translate_text(line)
+                    if translated != line:
+                        lines.append(f"\n**中文翻译：** {translated}")
                 lines.append("")
+
+    # 音频事件标注追加到 Markdown 末尾
+    if audio_events:
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## 音频事件标记")
+        lines.append("")
+        for s_ms, e_ms, tags in audio_events:
+            lines.append(f"- `{_ms_to_ts(s_ms)}` {'、'.join('【' + t + '】' for t in tags)}")
+        log(f"[音频] 追加 {len(audio_events)} 个片段标记到 Markdown")
+
+    # OCR 结果追加到 Markdown 末尾
+    if ocr_results:
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append("## 画面文字（OCR）")
+        lines.append("")
+        for ms, txt in ocr_results:
+            lines.append(f"- `{_ms_to_ts(ms)}` {txt}")
+        log(f"[OCR] 追加 {len(ocr_results)} 条画面文字到 Markdown")
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines).rstrip() + "\n")
     log(f"[Markdown] 已生成: {md_path}（{len(chapters)} 个章节）")
+
     return md_path
 
 
 def _cjk_font_name() -> str:
-    """按平台返回可用的中文字体名（避免日文字体渲染中文的问题）"""
+    """按平台返回可用的中文字体名（优先思源黑体/Noto Sans SC，其次微软雅黑）。
+    
+    Windows 10+ 自带 Noto Sans SC（思源黑体），通过注册表检测。
+    注册表里的 font name 形如 "Noto Sans SC (TrueType)"，取括号前部分即 "Noto Sans SC"。
+    """
     import platform as _pf
     sysname = _pf.system().lower()
     if sysname == "windows":
+        try:
+            import winreg
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts"
+            ) as key:
+                for i in range(winreg.QueryInfoKey(key)[1]):
+                    name, _, _ = winreg.EnumValue(key, i)
+                    n_lower = name.lower()
+                    if "noto sans sc" in n_lower or "source han sans sc" in n_lower:
+                        # "Noto Sans SC (TrueType)" → "Noto Sans SC"
+                        return name.split("(")[0].strip()
+        except Exception:
+            pass
         return "微软雅黑"
     if sysname == "darwin":
         return "PingFang SC"
@@ -1929,7 +3010,7 @@ def _set_run_font(run, font_name: str) -> None:
         pass
 
 
-def generate_docx(text: str, title: str, outdir: Path) -> Path:
+def generate_docx(text: str, title: str, outdir: Path, scenes: Optional[List] = None) -> Path:
     """将转写文本生成为 DOCX 文件（自动清洗，完整段落）"""
     base = safe_slug(title) or "transcript"
     docx_path = outdir / f"{base}.docx"
@@ -1976,16 +3057,27 @@ def generate_docx(text: str, title: str, outdir: Path) -> Path:
         _set_run_font(r, cjk)
 
     # 正文：按章节 → 段落输出（章节用 Heading 2，正文首行缩进 2 字符 + 两端对齐）
-    chapters = _build_script_chapters(text, outdir)
+    chapters = _build_script_chapters(text, outdir, scenes=scenes)
 
     if chapters:
         for ch in chapters:
-            h = doc.add_heading(ch["title"], level=2)
+            h = doc.add_heading(ch["title"],
+                                level=2 if ch.get("level", 1) == 1 else 3)
             for r in h.runs:
                 _set_run_font(r, cjk)
             for para_text in ch["paragraphs"]:
                 p = doc.add_paragraph(para_text)
                 _format_body_para(p, cjk)
+                # Bilingual: add Chinese translation after English
+                if BILINGUAL_ENABLED and _is_english_text(para_text):
+                    translated = _translate_text(para_text)
+                    if translated != para_text:
+                        tp = doc.add_paragraph()
+                        tr = tp.add_run(f"中文翻译：{translated}")
+                        _set_run_font(tr, cjk)
+                        r2 = tp.add_run()
+                        r2.font.size = Pt(10)
+                        r2.font.color.rgb = None  # gray
     else:
         # 兜底：清洗后的段落
         for para_text in [x.strip() for x in cleaned.split("\n") if x.strip()]:
@@ -2151,6 +3243,13 @@ def generate_breakdown(text: str, title: str, outdir: Path) -> Path:
     lines.append("")
     lines.append("*注：此分析为自动提炼，仅供参考。*")
 
+    if audio_events:
+        lines.append("")
+        lines.append("## 音频事件标记")
+        lines.append("")
+        for s_ms, e_ms, tags in audio_events:
+            lines.append(f"- `{_ms_to_ts(s_ms)}` {'、'.join('【'+t+'】' for t in tags)}")
+
     with open(breakdown_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
     log(f"[拆解分析] 已生成: {breakdown_path}")
@@ -2215,6 +3314,73 @@ def generate_timestamped_txt(outdir: Path, title: str = "transcript") -> Path:
 
 
 # ==================== 入口 ====================
+def _run_ocr(video_path, args):
+    """统一的 OCR 调用入口：读 args 参数、识别、返回 [(ms, text), ...]。任何异常都降级为 []。
+
+    门控：纯音频文件（mp3/wav/...，无视频流）直接跳过——没有画面可识别，
+    强行跑只会浪费时间并返回 0 条结果。
+    """
+    if not getattr(args, "ocr", False):
+        return []
+    # 无画面则跳过（纯音频文件）
+    try:
+        if not scene_audio.has_video_stream(str(video_path)):
+            log("[OCR] 输入为纯音频（无视频流），跳过画面文字识别")
+            return []
+    except Exception as e:
+        log(f"[OCR] 画面探测失败({e})，按有画面继续")
+    if not scene_audio.ocr_available():
+        log("[OCR] PaddleOCR 不可用，跳过画面文字识别（安装：pip install paddleocr paddlepaddle）")
+        return []
+    try:
+        res = scene_audio.ocr_video_frames(
+            str(video_path),
+            interval_sec=getattr(args, "ocr_interval", 2.0) or 2.0,
+            crop_bottom=getattr(args, "ocr_bottom", None),
+            max_frames=getattr(args, "ocr_max_frames", 150) or 150,
+            diff_threshold=getattr(args, "ocr_diff", 2.5),
+            max_side=getattr(args, "ocr_max_side", 960),
+        )
+        log(f"[OCR] 识别到 {len(res)} 条画面文字")
+        return res
+    except Exception as e:
+        log(f"[OCR] 失败: {e}")
+        return []
+
+
+def _pre_translate_english(text: str):
+    """Pre-translate all unique English paragraphs to warm the cache.
+    Uses 0.5s inter-request delay to respect MyMemory free-tier rate limits.
+    Without this delay, MyMemory blocks after ~3 rapid requests."""
+    lines = text.split("\n")
+    seen = set()
+    to_translate = []
+    for line in lines:
+        s = line.strip()
+        if s and _is_english_text(s) and s not in seen:
+            seen.add(s)
+            to_translate.append(s)
+    if not to_translate:
+        return
+    log(f"[双语] 预翻译 {len(to_translate)} 条英文段落...")
+    success, fail = 0, 0
+    for i, para in enumerate(to_translate, 1):
+        try:
+            result = _translate_text(para, source_lang="auto", target_lang="zh-CN")
+            if result != para:
+                success += 1
+                log(f"[双语]   [{i}/{len(to_translate)}] OK: {result[:40]}...")
+            else:
+                fail += 1
+                log(f"[双语]   [{i}/{len(to_translate)}] 原样返回: {para[:40]}...")
+        except Exception as e:
+            fail += 1
+            log(f"[双语]   [{i}/{len(to_translate)}] 失败: {e}")
+        if i < len(to_translate):
+            time.sleep(0.5)  # respect MyMemory rate limit
+    log(f"[双语] 预翻译完成: {success} 成功, {fail} 失败, 缓存 {len(_TRANSLATE_CACHE)} 条")
+
+
 def main():
     ap = argparse.ArgumentParser(description="微信媒体 + 多平台视频/音乐下载")
     ap.add_argument("input", help="视频链接、公众号文章链接、视频文件或音频文件路径")
@@ -2224,25 +3390,62 @@ def main():
     ap.add_argument("--no-whisper", action="store_true", help="跳过转写")
     ap.add_argument("--model", default="small", choices=["tiny", "base", "small", "medium"],
                     help="Whisper模型: tiny(~150MB), base(~1GB), small(~2GB,默认), medium(~5GB)")
-    ap.add_argument("--lang", default="zh", help="语言: zh(中文), en(英文), auto(自动)")
+    ap.add_argument("--lang", default="zh",
+                    help="语言: zh(中文), en(英文), auto(分块语种检测，中英混音视频用，较慢)")
     ap.add_argument("--denoise", action="store_true", help="启用降噪预处理（提升嘈杂环境识别率）")
+    ap.add_argument("--enhance", action="store_true", help="启用场景/音频识别增强（镜头检测+人声分离+音频事件标签）")
+    ap.add_argument("--ocr", action="store_true", help="启用视频帧OCR（识别画面中的字幕/歌词等文字，需安装 paddleocr）")
+    ap.add_argument("--ocr-interval", type=float, default=2.0,
+                    help="OCR 抽帧间隔（秒，默认2.0；越小越准但越慢）")
+    ap.add_argument("--ocr-bottom", type=float, default=None,
+                    help="只识别画面底部该比例区域（0.0~1.0，如 0.35），适合字幕/歌词，可减少干扰；默认全画面")
+    ap.add_argument("--ocr-max-frames", type=int, default=150,
+                    help="OCR 最大抽帧数（默认150，防止长视频跑飞）")
+    ap.add_argument("--ocr-diff", type=float, default=2.5,
+                    help="OCR 帧间差异阈值（默认2.5）。低于此值视为画面未变而跳过识别，"
+                         "可省 60%%~85%% 的帧；设 0 关闭预筛（逐帧识别，最慢最全）")
+    ap.add_argument("--ocr-max-side", type=int, default=960,
+                    help="OCR 抽帧时限制长边像素（默认960，竖屏视频可大幅提速）；设0关闭缩放")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="whisper 线程数（默认自动 min(8,CPU核数)；16核机器上 8 线程实测最优，"
+                         "超过反而变慢）")
+    ap.add_argument("--prompt", default=None,
+                    help="whisper 初始提示词（人名/术语/歌名等，可提升专有名词识别准确率）")
+    ap.add_argument("--terms", default=None,
+                    help="术语词典 JSON 文件路径（ASR 同音/近音错误自动修正）。"
+                         "默认使用内置金融词典 terminology/finance.json；"
+                         "自定义路径如 --terms ~/.workbuddy/terminology/myterms.json")
+    ap.add_argument("--ocr-correct", action="store_true",
+                    help="启用 OCR 校正 ASR：用画面 OCR 文字替换 Whisper 转写错误片段，"
+                         "仅当同时使用 --ocr 时有效（唱歌/歌词视频推荐开启）")
     ap.add_argument("--format", choices=["txt", "md", "docx", "all"], default="all",
                     help="输出格式: txt=纯文本, md=Markdown, docx=Word文档, all=全部(默认)")
     ap.add_argument("--breakdown", action="store_true", help="生成爆款拆解分析（结构化观点提炼）")
     ap.add_argument("--llm", action="store_true",
                     help="启用 LLM 智能整理（默认关闭，全程走本地规则式处理）。"
                          "需先配置 LLM_API_KEY/LLM_BASE_URL，或写入 ~/.config/multi-media-processor/llm.json")
+    ap.add_argument("--bilingual", action="store_true",
+                    help="启用双语转写：原文非中文部分保留，后面跟中文翻译。"
+                         "需设置环境变量 BILINGUAL_ENABLED=1（默认关闭，避免网络依赖）")
     args = ap.parse_args()
 
     # LLM 总开关：默认关闭，仅当用户显式加 --llm 时启用
-    global LLM_ENABLED
+    global LLM_ENABLED, USE_LLM
     if args.llm:
         LLM_ENABLED = True
+        USE_LLM = True
         if _load_llm_config():
             log("[LLM] 已按用户要求启用智能整理")
         else:
             log("[LLM] 已启用开关，但未检测到 API 配置（LLM_API_KEY 等），将回退本地规则式处理")
             LLM_ENABLED = False
+            USE_LLM = False
+
+    # Bilingual 总开关：默认关闭，仅当用户显式加 --bilingual 时启用
+    global BILINGUAL_ENABLED
+    if args.bilingual or os.environ.get("BILINGUAL_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"):
+        BILINGUAL_ENABLED = True
+        log("[双语] 已启用双语转写模式")
 
     input_str = args.input.strip()
 
@@ -2297,10 +3500,22 @@ def main():
         # 使用文件名作为初始标题（后续若无意义，转写后从内容重新提炼主题）
         init_title = safe_slug(src.stem) or "transcript"
 
+        # 场景识别增强：转场边界切章 + 音频事件标签
+        enhance = args.enhance
+        scenes, audio_events = [], []
+        if enhance:
+            if scene_audio.scene_detect_available():
+                scenes = scene_audio.detect_scenes(str(dest))
+            if scene_audio.audio_tag_available():
+                audio_events = scene_audio.classify_audio_events(str(dest))
+        # 视频帧 OCR：识别画面中的字幕/歌词
+        ocr_results = _run_ocr(dest, args)
         # Whisper 转写（用初始标题命名转写产物，避免与后续 {title}_raw.txt 重复）
         if not args.no_whisper:
             text = transcribe_whisper(dest, outdir, model=args.model, lang=args.lang,
-                                      denoise=args.denoise, title=init_title)
+                                      denoise=args.denoise, title=init_title,
+                                      vocal_sep=enhance, threads=args.threads,
+                                      prompt=args.prompt)
             if text:
                 # 确定最终标题：文件名有意义则用之，否则结合转写内容提炼主题
                 title = init_title
@@ -2330,16 +3545,92 @@ def main():
                 except Exception as e:
                     log(f"[时间戳TXT] 生成失败: {e}")
 
+                # OCR 校正 ASR（唱歌视频专用）
+                corrected_segments = None
+                _srt_path = outdir / "subtitle.srt"
+                if getattr(args, "ocr_correct", False) and ocr_results and _srt_path.exists():
+                    try:
+                        log("[OCR校正] 尝试用画面歌词校正 Whisper 转写...")
+                        segments = scene_audio.parse_srt(str(_srt_path))
+                        corrected_segments = scene_audio.align_ocr_to_srt(
+                            segments, ocr_results,
+                            tolerance_ms=2500, min_similarity=0.20
+                        )
+                        replaced = sum(1 for _s, _e, orig, cor in corrected_segments if orig != cor)
+                        if replaced:
+                            # 写回校正后 SRT（供下游生成）
+                            corr_srt = scene_audio.generate_corrected_srt(corrected_segments, outdir, title)
+                            log(f"[OCR校正] 替换了 {replaced} 个片段，已写入 {os.path.basename(corr_srt)}")
+                            # 同时用校正文本更新 Markdown / DOCX 使用的 text
+                            corrected_text = "\n".join(
+                                cor for _s, _e, _orig, cor in corrected_segments
+                            )
+                            text = corrected_text
+                        else:
+                            log("[OCR校正] 未找到相似度达标的匹配，保留原转写")
+                            corrected_segments = None
+                    except Exception as e:
+                        log(f"[OCR校正] 跳过: {e}")
+
+                # 术语修正：应用 ASR 同音/近音错误词典
+                text, term_count, term_domains = _apply_terminology(text, getattr(args, "terms", None))
+                if term_count > 0:
+                    # 写回修正后的 transcript_raw.txt
+                    transcript_path = outdir / f"{title}_raw.txt"
+                    if not transcript_path.exists():
+                        transcript_path = outdir / "transcript_raw.txt"
+                    transcript_path.write_text(text, encoding="utf-8")
+                    domain_info = f" | 领域: {', '.join(term_domains)}" if term_domains else ""
+                    log(f"[术语] 修正 {term_count} 处 ASR 同音/近音错误{domain_info}")
+
                 # 生成 Markdown 和 DOCX
                 if args.format in ("md", "all"):
-                    generate_markdown(text, title, outdir)
+                    generate_markdown(text, title, outdir, scenes=scenes, audio_events=audio_events, ocr_results=ocr_results)
                 if args.format in ("docx", "all"):
-                    generate_docx(text, title, outdir)
+                    generate_docx(text, title, outdir, scenes=scenes)
                 if args.breakdown:
                     generate_breakdown(text, title, outdir)
 
                 # 统一命名：视频/字幕也用主题名（须在 timestamped 生成之后）
                 _unify_output_names(outdir, title, dest)
+        else:
+            # --no-whisper: 尝试读取已有的 transcript_raw.txt 继续生成
+            _raw_files = list(outdir.glob("transcript_raw.txt"))
+            if not _raw_files:
+                _raw_files = list(outdir.glob("*_raw.txt"))
+            if _raw_files:
+                _raw_path = _raw_files[0]
+                text = _raw_path.read_text(encoding="utf-8")
+                title = _raw_path.stem.replace("_raw", "") or "transcript"
+                simp = _to_simplified(text)
+                if simp != text:
+                    (outdir / f"{title}_simplified.txt").write_text(simp, encoding="utf-8")
+                log(f"[复用] 使用已有转写: {_raw_path.name} ({len(text)} 字)")
+                # 术语修正
+                text, term_count, term_domains = _apply_terminology(text, getattr(args, "terms", None))
+                if term_count > 0:
+                    _raw_path.write_text(text, encoding="utf-8")
+                    log(f"[术语] 修正 {term_count} 处 ASR 同音/近音错误" + (f" (领域: {', '.join(term_domains)})" if term_domains else ""))
+                # Bilingual: pre-translate all English paragraphs (avoids rate-limit hangs mid-generation)
+                if BILINGUAL_ENABLED:
+                    _pre_translate_english(text)
+                if args.format in ("md", "all"):
+                    try:
+                        generate_markdown(text, title, outdir, scenes=scenes, audio_events=audio_events, ocr_results=ocr_results)
+                        log(f"[复用] Markdown 已生成")
+                    except Exception as e:
+                        log(f"[复用] Markdown 生成失败: {e}")
+                if args.format in ("docx", "all"):
+                    try:
+                        generate_docx(text, title, outdir, scenes=scenes)
+                        log(f"[复用] DOCX 已生成")
+                    except Exception as e:
+                        log(f"[复用] DOCX 生成失败: {e}")
+                if args.breakdown:
+                    generate_breakdown(text, title, outdir)
+                _unify_output_names(outdir, title, dest)
+            else:
+                log("[复用] 未找到已有转写文件，跳过生成（建议先运行 Whisper 转写）")
 
         log(f"{'='*50}")
         log(f"完成! 输出目录: {outdir}")
@@ -2369,11 +3660,66 @@ def main():
         # Cookie 配置检查（含 proxy 安全网）对 macOS/Linux 同样必要
         if not ensure_config():
             sys.exit("\n请先按上方提示配置 Cookie 后重试。")
-        meta = process_sph(input_str, str(outdir))
+        meta = process_sph(input_str, str(outdir), lang=args.lang,
+                           model=args.model, enhance=args.enhance)
         log(f"输出目录: {outdir}")
         log(f"类型: {meta['type']}")
         for k, v in meta.get("files", {}).items():
             log(f"  - {k}: {v}")
+
+        # 视频号分支的增强：镜头检测 + 音频事件 + 画面 OCR
+        vf = Path(outdir) / "video.mp4"
+        scenes, audio_events = [], []
+        if args.enhance and vf.exists():
+            if scene_audio.scene_detect_available():
+                try:
+                    scenes = scene_audio.detect_scenes(str(vf))
+                    log(f"[增强] 镜头检测：{len(scenes)} 个转场")
+                except Exception as e:
+                    log(f"[增强] 镜头检测失败: {e}")
+            if scene_audio.audio_tag_available():
+                try:
+                    audio_events = scene_audio.classify_audio_events(str(vf))
+                    log(f"[增强] 音频事件：{len(audio_events)} 个片段")
+                except Exception as e:
+                    log(f"[增强] 音频事件失败: {e}")
+        ocr_results = _run_ocr(vf, args) if vf.exists() else []
+
+        # 读取已生成的转写文本（优先 raw，有中文才转简体）
+        text = ""
+        raw_path = outdir / "transcript_raw.txt"
+        if raw_path.exists():
+            raw_text = raw_path.read_text(encoding="utf-8")
+            # 如果 raw 里有中文字符则转简体，否则保留原文（如英文视频）
+            if any('\u4e00' <= c <= '\u9fff' for c in raw_text):
+                text = _to_simplified(raw_text)
+            else:
+                text = raw_text
+        # 术语修正
+        if text:
+            text, term_count, term_domains = _apply_terminology(text, getattr(args, "terms", None))
+            if term_count > 0:
+                raw_path.write_text(text, encoding="utf-8")
+                log(f"[术语] 修正 {term_count} 处 ASR 同音/近音错误" + (f" (领域: {', '.join(term_domains)})" if term_domains else ""))
+                # 同步修正 SRT 字幕（语义章节划分的正文来自 SRT，不修正会残留错误词）
+                srt_path = outdir / "transcript_raw.srt"
+                if srt_path.exists():
+                    srt_text = srt_path.read_text(encoding="utf-8")
+                    srt_fixed, srt_cnt, _ = _apply_terminology(srt_text, getattr(args, "terms", None))
+                    if srt_cnt > 0:
+                        srt_path.write_text(srt_fixed, encoding="utf-8")
+                        log(f"[术语] SRT 字幕同步修正 {srt_cnt} 处")
+        if text and args.format in ("md", "all"):
+            title = safe_slug(meta.get("title", "视频号视频")) or "视频号视频"
+            generate_markdown(text, title, outdir, scenes=scenes,
+                              audio_events=audio_events, ocr_results=ocr_results)
+        if text and args.format in ("docx", "all"):
+            try:
+                title = safe_slug(meta.get("title", "视频号视频")) or "视频号视频"
+                generate_docx(text, title, outdir, scenes=scenes)
+            except Exception as e:
+                log(f"[DOCX] 生成失败: {e}")
+
         log("=== WX_MEDIA_DONE ===")
         log("下一步：agent 读 transcript_raw.txt (+ metadata.json) 提炼『核心观点』写入 核心观点.md")
         return
@@ -2442,9 +3788,21 @@ def main():
         if _cleaned:
             init_title = _cleaned
 
+        # 场景识别增强：转场边界切章 + 音频事件标签
+        enhance = args.enhance
+        scenes, audio_events = [], []
+        if enhance:
+            if scene_audio.scene_detect_available():
+                scenes = scene_audio.detect_scenes(str(vf))
+            if scene_audio.audio_tag_available():
+                audio_events = scene_audio.classify_audio_events(str(vf))
+        # 视频帧 OCR：识别画面中的字幕/歌词
+        ocr_results = _run_ocr(vf, args)
         # 用初始标题命名转写产物（避免与后续 {title}_raw.txt 重复）
         text = transcribe_whisper(vf, outdir, model=args.model, lang=args.lang,
-                                  denoise=args.denoise, title=init_title)
+                                  denoise=args.denoise, title=init_title,
+                                  vocal_sep=enhance, threads=args.threads,
+                                  prompt=args.prompt)
         if text:
             title = init_title
             # 标题无明确语义时（如抖音无描述），结合转写内容提炼主题命名
@@ -2476,11 +3834,11 @@ def main():
 
             # 生成 Markdown
             if args.format in ("md", "all"):
-                generate_markdown(text, title, outdir)
+                generate_markdown(text, title, outdir, scenes=scenes, audio_events=audio_events, ocr_results=ocr_results)
 
             # 生成 DOCX
             if args.format in ("docx", "all"):
-                generate_docx(text, title, outdir)
+                generate_docx(text, title, outdir, scenes=scenes)
 
             if args.breakdown:
                 generate_breakdown(text, title, outdir)
