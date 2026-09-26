@@ -2,7 +2,7 @@
 
 > 微信视频号 / 公众号 / B站 / 抖音 / YouTube 等平台的视频下载与转写工具
 >
-> 当前版本：**v1.3.8**
+> 当前版本：**v1.3.9**
 
 ## 🚀 快速开始
 
@@ -91,6 +91,7 @@ output/multi-media/video_title/
     ├── multi-media-processor.py        # 主脚本
     ├── scene_audio.py                  # 场景识别 / OCR / 音频事件模块
     ├── install_dependencies.py         # 依赖自动安装
+    ├── cross_validate_ocr_asr.py       # OCR×ASR 跨验证（唱歌视频歌词精准校正）
     ├── terminology/                    # ASR 术语修正词典（6 领域）
     └── _deprecated/                    # 历史方案归档（sph Worker / Bridge）
 ```

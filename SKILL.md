@@ -1,7 +1,7 @@
 ---
 name: multi-media-processor
 description: "多平台音视频下载、转写与内容处理（单一入口，无需中转其他技能）：视频号→解析原地址→下载→Whisper本地转写→核心观点；公众号→抓取正文→摘要；支持B站/YouTube/小红书/TikTok/微博/Dailymotion/Vimeo/抖音等平台的视频下载与转写；也支持直接传入本地音视频文件。输出格式支持 txt / srt / markdown / docx，共四种类型。纯文字类内容（公众号文章）不生成字幕，只输出 txt + markdown + docx 三种。"
-version: 1.3.8
+version: 1.3.9
 author: Dean Yih
 platforms: [windows, linux, macos]
 agent_created: true
@@ -571,7 +571,12 @@ python "scripts/multi-media-processor.py" "<链接>" --enhance --ocr --ocr-corre
 - `--ocr-bottom 0.35`：只扫画面底部 35%，避免医院标语等干扰
 - 相似度阈值默认 `0.20`，可调但一般无需修改
 
-### 5.10 唱歌视频 OCR-ASR 跨验证（v1.3.0+，独立工作流）
+### 5.10 唱歌视频 OCR-ASR 跨验证（v1.3.0+，独立工作流；脚本 v1.3.9 起随包发布）
+
+> 本节原为手工流程记录（脚本未随包提供）。v1.3.9 已把该工作流实现为
+> `scripts/cross_validate_ocr_asr.py`，并对齐了本文档描述的 CLI 契约；
+> 用 0.1s 密集采样样本（《名字我早已想好》43-50s）离线对账，输出与历史
+> v13 成品逐字一致。
 
 对唱歌/翻唱视频，`--ocr-correct` 的相似度阈值对齐可能漏掉歌词（时间窗口 ±2s 太宽导致跨段混入，或间隔太大漏掉画面文字）。
 **跨验证工作流**用 0.1s 间隔密集采样 + 严格段内匹配，逐句从 OCR 画面文字中比对取歌词，精准率可达 95%+。
@@ -582,42 +587,39 @@ python "scripts/multi-media-processor.py" "<链接>" --enhance --ocr --ocr-corre
 - **噪声过滤**：医院招牌（禁止吸烟、主治医师等）、英文乱码、OCR 前缀噪声
 - **质量分级**：high（OCR 直接匹配）/ low（无 OCR，ASR 校正）
 
-**工作流脚本**（`scripts/cross_validate_ocr_asr.py`）：
-```bash
-# 对已有 SRT 字幕的视频做 OCR-ASR 跨验证
-python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --ocr-interval 0.1
+**工作流脚本**（`scripts/cross_validate_ocr_asr.py`，已随技能发布）：
 
-# 指定时间范围（只验证某段）
+```bash
+# 对已有 SRT 字幕的视频做 OCR-ASR 跨验证（默认 0.1s 密集采样）
+python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径>
+
+# 指定时间范围（只验证某段，调试/复核常用）
 python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --range 43-50 --ocr-interval 0.1
 
-# 输出 JSON + HTML 报告 + MD 歌词
-python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --format all
+# 只扫画面底部 35% 字幕区 + 输出全部产物
+python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --ocr-bottom 0.35 --format all
 ```
 
-**关键代码要点**：
-1. **PaddleOCR 3.x API**：`predict()` 返回 list of dict，需 `for page in pred` 迭代：
-   ```python
-   pred = ocr.predict(str(img_path))
-   for page in pred:
-       if isinstance(page, dict):
-           texts = page.get('rec_texts', [])
-           scores = page.get('rec_scores', [])
-           for text, score in zip(texts, scores):
-               ...
-   ```
-2. **密集采样**：0.1s 间隔用 ffmpeg 逐帧提取（`-ss <时间> -i <视频> -frames:v 1`）
-3. **噪声过滤**：
-   ```python
-   NOISE_KEYWORDS = ['禁止', '吸烟', 'NO SMOK', '主任', '医师', '医务', 'BP',
-                    '出国师', '中西', '新结', '医码', '医销', '医国']
-   NOISE_PREFIXES = ['禁止吸烟', '禁止吸煙', '医销', '医码', '出医码', '出银物', '出银销']
-   ```
-4. **严格段内匹配**：
-   ```python
-   def match_ocr(start_s, end_s):
-       start_ms, end_ms = int(start_s * 1000), int(end_s * 1000)
-       return [(ts, text) for ts, text in ocr_lyrics if start_ms <= ts < end_ms]
-   ```
+**参数**：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--ocr-interval` | 0.1 | 抽帧间隔（秒）。**0.1 是密集采样**；1s/0.5s 会漏短句歌词 |
+| `--range` | 全片 | 只验证指定时间范围，格式 `43-50`（秒） |
+| `--ocr-bottom` | 全画面 | 只识别画面底部该比例区域（如 `0.35`），滤掉画面其它文字并提速 |
+| `--min-score` | 0.3 | OCR 置信度阈值 |
+| `--format` | all | `json` / `html` / `md` / `txt` / `srt` / `all` |
+| `--out-dir` | SRT 同级 `<stem>_crossval/` | 输出目录 |
+| `--title` | 视频文件名主干 | 产物标题前缀 |
+| `--keep-frames` | 关 | 保留抽帧图片便于人工复核（默认清理临时帧） |
+
+**实现要点**：
+1. **抽帧**：一次性 `fps` 滤镜抽帧（`-ss <start> -t <span> -vf fps=1/interval`），比逐帧 seek 快一个数量级；结果异常时自动回退逐帧 seek（时间戳精确）
+2. **OCR**：复用 `scene_audio` 的 `_ocr_one_image()`（已内置 PaddleOCR 3.x/2.x 返回格式兼容与 `enable_mkldnn=False` 规避）
+3. **噪声过滤**：医院招牌等固定干扰（禁止吸烟/主任/医师等）、OCR 前缀噪声、纯 ASCII 短串乱码
+4. **严格段内匹配**：`start_ms <= ts_ms < end_ms`（左闭右开），避免歌词跨段混入
+5. **同句合并**：段内多条 OCR 按首次出现顺序合并（先剔除被更长文本包含的碎片），保留"男才女貌 地设天造"这类跨行的完整歌词，而非只取单条最长
+6. **质量分级**：high（命中 OCR 画面文字）/ low（无 OCR，回退 ASR 规则校正）
 
 **输出产物**：
 - `cross_validation_final.json`：完整验证数据（段号、时间、ASR 原音、最终歌词、OCR 匹配、质量）
