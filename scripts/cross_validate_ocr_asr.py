@@ -21,9 +21,9 @@ cross_validate_ocr_asr.py — OCR × ASR 跨验证工作流（唱歌/歌词视�
 输出产物（默认写入 SRT 同级的 <stem>_crossval/ 目录）:
     cross_validation_final.json     完整验证数据（段号/时间/ASR原音/最终歌词/OCR匹配/质量）
     cross_validation_report.html    可视化对比报告
-    <标题>_v13.md                   Markdown 歌词（带时间戳 + ASR 原音 + OCR 画面对照）
-    <标题>_v13.txt                  纯歌词
-    <标题>_v13.srt                  SRT 字幕
+    <标题>_crossval.md                   Markdown 歌词（带时间戳 + ASR 原音 + OCR 画面对照）
+    <标题>_crossval.txt                  纯歌词
+    <标题>_crossval.srt                  SRT 字幕
 
 依赖：paddleocr / paddlepaddle（CPU 版）、ffmpeg（技能自带优先）。
 首次使用会下载 OCR 模型（约 200MB），之后缓存复用。
@@ -386,17 +386,17 @@ def main():
             log(f"      HTML: {p}")
 
         if wants("md"):
-            p = outdir / f"{title}_v13.md"
+            p = outdir / f"{title}_crossval.md"
             p.write_text(build_md(title, results), encoding="utf-8")
             log(f"      MD: {p}")
 
         if wants("txt"):
-            p = outdir / f"{title}_v13.txt"
+            p = outdir / f"{title}_crossval.txt"
             p.write_text("\n".join(r["final_text"] for r in results) + "\n", encoding="utf-8")
             log(f"      TXT: {p}")
 
         if wants("srt"):
-            p = outdir / f"{title}_v13.srt"
+            p = outdir / f"{title}_crossval.srt"
             p.write_text(build_srt(results), encoding="utf-8")
             log(f"      SRT: {p}")
 

@@ -624,9 +624,9 @@ python "scripts/cross_validate_ocr_asr.py" <视频路径> <SRT路径> --ocr-bott
 **输出产物**：
 - `cross_validation_final.json`：完整验证数据（段号、时间、ASR 原音、最终歌词、OCR 匹配、质量）
 - `cross_validation_report.html`：可视化对比报告
-- `<主题>_v13.md`：Markdown 歌词（带时间戳 + ASR 原音 + OCR 画面对照）
-- `<主题>_v13.txt`：纯歌词
-- `<主题>_v13.srt`：SRT 字幕
+- `<主题>_crossval.md`：Markdown 歌词（带时间戳 + ASR 原音 + OCR 画面对照）
+- `<主题>_crossval.txt`：纯歌词
+- `<主题>_crossval.srt`：SRT 字幕
 
 ### 5.12 ASR 术语自动修正 — 多领域智能检测（v1.3.5+）
 
