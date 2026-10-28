@@ -36,3 +36,7 @@ _meta.json
 _skillhub_meta.json
 _icon.png
 .whisper/
+.work_dir/
+*.pyc
+*.db
+.dependency_hashes.json

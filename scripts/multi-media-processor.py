@@ -10,6 +10,20 @@ multi-media-processor.py — 微信视频号/公众号链接一键处理
 
 依赖：Python 3.8+ 、httpx、yt-dlp、ffmpeg、whisper CLI、requests
 """
+# --- portable bootstrap (U-drive aware; safe to keep on the home PC) ---
+import os as _pb_os, sys as _pb_sys
+from pathlib import Path as _pb_Path
+_PB_CFG = _pb_os.environ.get("WORKBUDDY_CONFIG_DIR")
+def _wbroot():
+    """Root of the .workbuddy data dir: U-drive when portable, else home."""
+    return _pb_Path(_PB_CFG) if _PB_CFG else _pb_Path.home() / ".workbuddy"
+def _wblib():
+    """Ensure the matching lib/ is importable and return it."""
+    _p = (_pb_Path(_PB_CFG) / "lib") if _PB_CFG else (_pb_Path.home() / ".workbuddy" / "lib")
+    if str(_p) not in _pb_sys.path:
+        _pb_sys.path.insert(0, str(_p))
+    return _p
+# --- end portable bootstrap ---
 import argparse, os, re, sys, json, time, socket, subprocess, shutil, warnings, importlib.util
 from pathlib import Path
 from urllib.parse import quote, unquote
@@ -32,7 +46,7 @@ def safe_slug(s: str, maxlen: int = 60) -> str:
 
 # ---------------- WorkBuddy 隔离 venv 自举 ----------------
 def _wb_venv_python() -> Optional[str]:
-    venv = Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default"
+    venv = _wbroot() / "binaries" / "python" / "envs" / "default"
     p = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     return str(p) if p.exists() else None
 
@@ -41,7 +55,7 @@ def _wb_managed_python() -> Optional[str]:
     base = getattr(sys, "_base_executable", None)
     if base and "binaries/python/versions" in base:
         return base
-    root = Path.home() / ".workbuddy" / "binaries" / "python" / "versions"
+    root = _wbroot() / "binaries" / "python" / "versions"
     if root.exists():
         vers = sorted(root.glob("*"), key=lambda p: p.name)
         for v in reversed(vers):
@@ -61,7 +75,7 @@ def _bootstrap_venv():
             managed = _wb_managed_python()
             if not managed:
                 return
-            venv = Path.home() / ".workbuddy" / "binaries" / "python" / "envs" / "default"
+            venv = _wbroot() / "binaries" / "python" / "envs" / "default"
             subprocess.run([managed, "-m", "venv", str(venv)], check=True, timeout=300,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             venv_py = _wb_venv_python()
@@ -193,7 +207,7 @@ def _workspace_from_session() -> Optional[Path]:
     sid = os.environ.get("CODEBUDDY_SESSION_ID") or os.environ.get("WORKBUDDY_SESSION_ID")
     if not sid:
         return None
-    base = Path.home() / ".workbuddy" / "projects"
+    base = _wbroot() / "projects"
     try:
         for proj in base.iterdir():
             if proj.is_dir() and (proj / f"{sid}.jsonl").exists():
@@ -205,7 +219,7 @@ def _workspace_from_session() -> Optional[Path]:
 
 def _latest_workbuddy_project() -> Optional[Path]:
     """兜底：取 ~/.workbuddy/projects/ 下最近活跃的工作区目录反解。"""
-    base = Path.home() / ".workbuddy" / "projects"
+    base = _wbroot() / "projects"
     try:
         candidates = [d for d in base.iterdir() if d.is_dir()]
     except Exception:
@@ -228,7 +242,7 @@ def _detect_or_prompt_work_dir() -> Path:
     6) WorkBuddy 最近活跃项目（projects 目录 mtime 最新者）
     7) 回退：用户主目录/multi-media
     """
-    user_config = Path.home() / ".workbuddy" / "multi-media-processor.conf"
+    user_config = _wbroot() / "multi-media-processor.conf"
     skill_config = SKILL_DIR / ".work_dir.conf"  # 兼容旧版
 
     env = os.environ.get("MULTI_MEDIA_OUTPUT")
@@ -422,7 +436,7 @@ SPH_COOKIE_ENV = "WX_SPH_COOKIE"
 
 def _load_secret_store():
     """懒加载统一密钥模块（不强制依赖，缺失时降级到直接读 .secrets.env）。"""
-    lib = Path.home() / ".workbuddy" / "lib" / "secret_store.py"
+    lib = _wbroot() / "lib" / "secret_store.py"
     if not lib.exists():
         return None
     try:
@@ -454,7 +468,7 @@ def _get_sph_cookie_secret() -> str:
         except Exception:
             pass
     # 3) 直接解析回退文件兜底
-    fb = Path.home() / ".workbuddy" / ".secrets.env"
+    fb = _wbroot() / ".secrets.env"
     if fb.exists():
         try:
             for line in fb.read_text(encoding="utf-8").splitlines():
@@ -743,6 +757,12 @@ def is_local_file(path: str) -> bool:
 
 def detect_platform(url: str) -> str:
     u = url.lower()
+    # 直接给出 m3u8 播放列表：交给 ffmpeg，不走平台解析
+    if u.split("?")[0].endswith(".m3u8"):
+        return "hls"
+    # 小鹅通（xet / xiaoeknow / pomoho）：H5 课程页，视频流需登录后捕获
+    if any(k in u for k in ("xet.pomoho.com", "xiaoeknow.com", "xet.tech", ".xet.com")):
+        return "xet"
     if "bilibili.com" in u or "b23.tv" in u or "bilibili.cn" in u:
         return "bilibili"
     if "youtube.com" in u or "youtu.be" in u:
@@ -784,7 +804,25 @@ def resolve_b23(url: str) -> str:
 
 
 def extract_id(url: str, platform: str) -> str:
-    if platform == "youtube":
+    if platform == "xet":
+        # 小鹅通资源 ID 统一带前缀：l_=直播/回放，p_=专栏/课程，v_=视频，t_=图文
+        # 先按前缀抓，避免被 /p/course/column/ 这类路径词误导
+        m = re.search(r"/([lptvc]_[A-Za-z0-9]{6,})", url)
+        if m:
+            return m.group(1)
+        # 回退：/course/<id>，但跳过 column/alive/detail 这类固定路径词
+        m = re.search(r"/course/([A-Za-z0-9_]+)", url)
+        if m and m.group(1) not in ("column", "alive", "detail", "list", "index"):
+            return m.group(1)
+        m = re.search(r"app([A-Za-z0-9]+)\.", url)
+        if m:
+            return "app" + m.group(1)
+    elif platform == "hls":
+        m = re.search(r"/([^/?]+)\.m3u8", url)
+        if m:
+            return safe_slug(m.group(1)) or "hls"
+        return "hls"
+    elif platform == "youtube":
         m = re.search(r"v=([\w-]+)", url)
         if m:
             return m.group(1)
@@ -1227,6 +1265,41 @@ def download_ytdlp(url: str, platform: str, vid: str, outdir: Path) -> Path:
     sz = target.stat().st_size
     log(f"[yt-dlp] 完成: {sz / 1024 / 1024:.1f} MB")
     return target
+
+
+def _load_xet_module():
+    """延迟导入 xet_downloader（同目录）。
+
+    做成延迟导入的原因：该模块依赖 Playwright，没装时不应影响 B站/抖音等
+    其它平台的正常使用。
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import xet_downloader
+    return xet_downloader
+
+
+def download_xet(url: str, vid: str, outdir: Path, workers=None,
+                 profile=None, keep_segments: bool = False) -> Path:
+    """小鹅通 H5 课程页：Playwright 捕获流地址 → 分片枚举 → 无损拼接。"""
+    xd = _load_xet_module()
+    log(f"[小鹅通] {vid} —— 用浏览器捕获视频流（需登录态；首次会弹出窗口，扫码后长期复用）")
+    try:
+        return xd.download_xet(url, outdir, name_hint=vid, workers=workers,
+                               profile=profile, keep_segments=keep_segments, log=log)
+    except RuntimeError as e:
+        raise ValueError(f"小鹅通下载失败: {e}")
+
+
+def download_hls(url: str, vid: str, outdir: Path) -> Path:
+    """用户直接给出 m3u8 地址：ffmpeg 直读（自带 AES-128 / fMP4 处理）。"""
+    xd = _load_xet_module()
+    log("[HLS] 直接读取 m3u8 播放列表")
+    try:
+        return xd.download_hls(url, outdir, name_hint=vid, log=log)
+    except RuntimeError as e:
+        raise ValueError(f"HLS 下载失败: {e}")
 
 
 def download_vimeo_ffmpeg(url: str, vid: str, outdir: Path) -> Path:
@@ -3387,6 +3460,12 @@ def main():
     ap.add_argument("--type", choices=["video", "music"], default=None,
                     help="指定类型：video=视频处理, music=音乐处理（默认自动检测）")
     ap.add_argument("--out", default=None, help="输出目录")
+    ap.add_argument("--xet-workers", type=int, default=None,
+                    help="小鹅通分片并发下载线程数（默认 16；实测 16 线程 54 片/秒）")
+    ap.add_argument("--xet-profile", default=None,
+                    help="小鹅通浏览器 profile 目录（保存登录态，默认 ~/.workbuddy/xet_profile）")
+    ap.add_argument("--xet-keep-segments", action="store_true",
+                    help="保留小鹅通下载的分片缓存（默认拼接成功后自动删除）")
     ap.add_argument("--no-whisper", action="store_true", help="跳过转写")
     ap.add_argument("--model", default="small", choices=["tiny", "base", "small", "medium"],
                     help="Whisper模型: tiny(~150MB), base(~1GB), small(~2GB,默认), medium(~5GB)")
@@ -3739,7 +3818,8 @@ def main():
     platform = detect_platform(input_str)
     if platform == "unknown":
         log(f"[错误] 不支持的平台: {input_str}")
-        log("支持: 微信视频号(sph) / 微信公众号(mp) / B站 / YouTube / 小红书 / TikTok / 微博 / Dailymotion / Vimeo")
+        log("支持: 微信视频号(sph) / 微信公众号(mp) / 小鹅通课程(xet) / 直接 m3u8 / "
+            "B站 / YouTube / 小红书 / TikTok / 微博 / Dailymotion / Vimeo")
         sys.exit(1)
 
     vid = extract_id(input_str, platform)
@@ -3762,6 +3842,13 @@ def main():
             vf = download_xiaohongshu(input_str, vid, outdir)
         elif platform == "douyin":
             vf = download_douyin(input_str, vid, outdir)
+        elif platform == "xet":
+            vf = download_xet(input_str, vid, outdir,
+                              workers=getattr(args, "xet_workers", None),
+                              profile=getattr(args, "xet_profile", None),
+                              keep_segments=getattr(args, "xet_keep_segments", False))
+        elif platform == "hls":
+            vf = download_hls(input_str, vid, outdir)
         else:
             vf = download_ytdlp(input_str, platform, vid, outdir)
     except Exception as e:

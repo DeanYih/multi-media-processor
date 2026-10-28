@@ -1,19 +1,21 @@
 ---
 name: multi-media-processor
-description: "多平台音视频下载、转写与内容处理（单一入口，无需中转其他技能）：视频号→解析原地址→下载→Whisper本地转写→核心观点；公众号→抓取正文→摘要；支持B站/YouTube/小红书/TikTok/微博/Dailymotion/Vimeo/抖音等平台的视频下载与转写；也支持直接传入本地音视频文件。输出格式支持 txt / srt / markdown / docx，共四种类型。纯文字类内容（公众号文章）不生成字幕，只输出 txt + markdown + docx 三种。"
-version: 1.3.9
+description: "多平台音视频下载、转写与内容处理（单一入口，无需中转其他技能）：视频号→解析原地址→下载→Whisper本地转写→核心观点；公众号→抓取正文→摘要；小鹅通课程→浏览器捕获视频流→分片枚举下载（支持混淆播放列表）；支持B站/YouTube/小红书/TikTok/微博/Dailymotion/Vimeo/抖音等平台的视频下载与转写，也支持直接给 m3u8 地址；还支持直接传入本地音视频文件。输出格式支持 txt / srt / markdown / docx，共四种类型。纯文字类内容（公众号文章）不生成字幕，只输出 txt + markdown + docx 三种。"
+version: 1.4.0
 author: Dean Yih
 platforms: [windows, linux, macos]
 agent_created: true
 ---
 
-# 多媒体处理（视频号 + 公众号 + 多平台视频）
+# 多媒体处理（视频号 + 公众号 + 小鹅通 + 多平台视频）
 
-用户发来 **微信视频号分享链接**（`weixin.qq.com/sph/...`）、**公众号文章链接**（`mp.weixin.qq.com/...`）或 **本地音视频文件路径**，自动处理并交付结果。
+用户发来 **微信视频号分享链接**（`weixin.qq.com/sph/...`）、**公众号文章链接**（`mp.weixin.qq.com/...`）、**小鹅通课程链接**（`*.h5.xet.pomoho.com/...`）或 **本地音视频文件路径**，自动处理并交付结果。
 
 - **视频号**：`解析原视频地址 → 下载 → 本地 Whisper 转写 → 提炼核心观点`
 - **公众号**：`抓取文章正文 → 结构化摘要/核心观点`
+- **小鹅通课程**：`浏览器捕获视频流 → 分片枚举下载 → 拼接 → 转写`（支持混淆播放列表，需登录态）
 - **多平台视频**：`B站/YouTube/小红书/TikTok/微博/Dailymotion/Vimeo/抖音 → 下载 + 转写`
+- **直接 m3u8**：`给出播放列表地址 → ffmpeg 直读（自带 AES-128 解密）→ 转写`
 - **本地文件**：`直接传入本地视频/音频路径 → 复制到输出目录 → 转写`（支持 mp4/avi/mkv/mov/mp3/wav/flac 等常见格式）
 - **输出格式**：`txt / srt / markdown / docx` 四选一或全部生成
 
@@ -44,6 +46,11 @@ agent_created: true
 **场景 4：微信公众号文章**
 看到一篇公众号文章觉得有价值，把链接发给我："帮我提取这篇文章的核心要点"，我就抓取全文、生成结构化摘要，产出 txt + md + docx 三种文档（无字幕，因为文章本身是纯文字内容）。
 
+**场景 5：小鹅通课程回放**（v1.4.0+）
+买的课想离线看 / 想要文字稿，把课程页链接丢给我。技能会弹出一个真实浏览器窗口：
+首次需要你扫码登录（登录态记在 profile 里，之后不用再扫），随后自动捕获视频流、
+按分片并发下载、无损拼接成 mp4，再照常转写。混淆播放列表也能处理，**不去破解加密**。
+
 ### 1.2 支持的平台与限制
 
 | 平台 | 状态 | 需要配置吗 |
@@ -51,6 +58,8 @@ agent_created: true
 | 微信视频号 | ✅ | 需要元宝 Cookie（约数周一换） |
 | 抖音 | ✅ | 需要 Cookie |
 | 微信公众号 | ✅ | 不需要 |
+| 小鹅通课程（xet） | ✅ | 需要登录态（首次扫码，之后复用） |
+| 直接给 m3u8 地址 | ✅ | 不需要 |
 | B 站/小红书/微博 | ✅ | 不需要 |
 | YouTube/TikTok/Vimeo/Dailymotion | ✅ | 需要施展魔法 |
 | 本地文件 | ✅ | 不需要 |
@@ -58,6 +67,7 @@ agent_created: true
 > 💡 **Cookie 说明**：
 > - 视频号需要登录态（元宝 Cookie）
 > - 抖音需要登录态（SessionID 等 Cookie）
+> - **小鹅通不需要 Cookie 字符串**——它靠真实浏览器登录态（扫码一次，存在独立 profile 里）
 > - B 站/本地文件**不需要任何配置**
 > - YouTube/TikTok/Vimeo 需要特殊网络环境
 
@@ -119,6 +129,12 @@ python "scripts/multi-media-processor.py" "<链接>" --no-whisper
 
 # 仅在用户明确要求时：启用 LLM 智能整理（默认不使用）
 python "scripts/multi-media-processor.py" "<链接>" --llm
+
+# 小鹅通课程：只下载不转写（浏览器窗口需扫码登录一次）
+python "scripts/multi-media-processor.py" "<课程链接>" --no-whisper
+
+# 小鹅通课程：调大并发（默认16线程，实测16线程可达 50+ 片/秒）
+python "scripts/multi-media-processor.py" "<课程链接>" --xet-workers 24
 ```
 
 **文本整理**：转写后自动整理——去除"呃""啊""那个""就是说"等口语化填充词、繁体转简体、**按语境补全标点**、分章节与段落。
@@ -273,6 +289,10 @@ python "scripts/multi-media-processor.py" "<链接>" --llm
 | 🎬 视频号解析成功却没有 `video.mp4`，Whisper 报 `转写失败 (exit=1)`（日志从「1. parse_sph」直接跳「3. Whisper」，缺「2. 下载」） | v1.3.6 简化时 `_sph_download_transcribe` 误删了下载步骤，拿到 `video_url` 后直接送 Whisper，文件不存在自然失败 | 已自动修复（v1.3.7）：补回 httpx 流式下载（腾讯 CDN 直链带 UA 即可 200，无需特殊 header/referer） |
 | 🌐 转写里出现**大段重复同一句**（某句连读几十次），或英文视频被转成中文、中文视频被转成英文 | **语言参数给错**。`-l zh` 落在英文原声上会"翻译式"解码，低置信段退化为自回归复读；`-l en` 落在中文解说上则会译成英文。另：whisper-cli 的 `-l auto` **只按开头 30 秒判语种**，中英混音视频必然判错 | 用 `--lang auto`（v1.3.8 起改为**分块语种检测**：每 30 秒重新判一次语种，日志打出「语言地图」）；已知纯语种时直接 `--lang zh`/`--lang en` 更快 |
 | 🔍 想确认音频到底是什么语种 | — | `python bin/whisper/scripts/transcribe.py <音频> --lang auto`，看日志里 `auto-detected language: xx (p=…)`；或按 MV 画面硬字幕/口型交叉验证 |
+| 🎓 小鹅通报「未捕获到任何视频流地址」 | 三种可能：未登录/未开通该课程、直播还没生成回放、页面停在封面没触发取流 | 重跑一次并在弹出的浏览器窗口里**扫码登录**；登录态会存进 profile。仍不行就 `--capture-only` 看是不是 0 条 |
+| 🎓 小鹅通报 `ModuleNotFoundError: playwright` | 首次使用没装捕获依赖 | `python -m pip install playwright`（**不要**跑 `playwright install`，直接复用系统 Edge/Chrome） |
+| 🎓 小鹅通下载中途大量 403 | 播放地址签名过期（约 10 分钟） | 脚本会自动停止新增请求并提示重新捕获；直接重跑即可（已下载分片会命中缓存跳过） |
+| 🎓 小鹅通成片画面花/不可播 | 该课程开了分片加密（分片首字节不是 `0x47`） | 日志会明确提示「抽样发现 N 个分片不是 TS」；此情况本技能不支持，不要产出坏文件 |
 
 ---
 
@@ -287,6 +307,7 @@ python "scripts/multi-media-processor.py" "<链接>" --llm
 | ffmpeg | 7.1 | [Gyan/codexffmpeg](https://www.gyan.dev/ffmpeg/builds/) | gyan.dev + ghfast.top 镜像 |
 | Whisper 模型 | v1.5.0 (ggml-small-q8_0) | [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp) | HuggingFace + ghfast.top 镜像 |
 | yt-dlp | 2026.08.19 | [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp) | PyPI (pip install) |
+| playwright | 1.64+ | [microsoft/playwright-python](https://github.com/microsoft/playwright-python) | PyPI (pip install playwright) |
 
 ### 5.2 Python 依赖
 
@@ -296,6 +317,7 @@ python "scripts/multi-media-processor.py" "<链接>" --llm
 | yt-dlp | 多平台视频下载 | pip install yt-dlp |
 | requests | 备用 HTTP 客户端 | pip install requests |
 | zhconv | 繁体转简体 | pip install zhconv（已内置） |
+| playwright | 小鹅通视频流捕获（`xet_downloader.py` 按需导入，不装不影响其它平台） | pip install playwright |
 
 ### 5.3 可选依赖
 
@@ -729,3 +751,97 @@ python "scripts/multi-media-processor.py" "<链接>" --terms ~/.workbuddy/termin
 | 质量标注 | 无 | high/low 分级 |
 | 输出格式 | 覆盖原文件 | 独立新文件 |
 | 适用场景 | 通用字幕校正 | 唱歌视频歌词精准校正 |
+
+### 5.13 小鹅通课程视频下载（v1.4.0+）
+
+> 触发：链接含 `*.h5.xet.pomoho.com` / `xiaoeknow.com` / `xet.tech` / `.xet.com`；
+> 或用户直接给出 `.m3u8` 地址（走 ffmpeg 路径，不需要浏览器）。
+
+#### 为什么不能像 B 站那样直接下
+
+| 障碍 | 具体表现 |
+|------|----------|
+| **微信 OAuth 墙** | 匿名访问课程页 302 到 `open.weixin.qq.com/connect/oauth2/authorize`，拿不到任何视频信息 |
+| **客户端签名** | 视频流地址由前端带签名换出，直接调接口签不出来 |
+| **`confusion_index` 混淆** | 主播放列表正文是 `[xiaoe]<百分号编码密文>`，播放器在 JS 里解密 |
+| **签名短时效** | 播放地址约 10 分钟过期，不能「先存链接慢慢下」 |
+
+所以做法是：**用真实浏览器拿到流地址 → 立刻下载**。
+
+#### 两条下载路径
+
+**路径 A：明文播放列表**（部分课程未开混淆）
+捕获到的正文以 `#EXTM3U` 开头 → 直接交给 ffmpeg 读主播放列表。
+ffmpeg 的 hls demuxer 自带 AES-128 解密与 fMP4（`EXT-X-MAP`）处理，无需额外代码。
+
+**路径 B：混淆播放列表**（小鹅通默认）——**不解密，直接绕过分片枚举**
+
+实测发现小鹅通腾讯云 VOD 分片的签名**不绑定路径**：同一个 `sign` 对任意序号
+`v.f146750_<n>.ts` 都返回 200/206。于是只要拿到**任意一片**的 URL 就够：
+
+```
+任意分片 URL → 拆出 (base, 序号, query)
+            → 指数探测找上界 + 二分定边界   （2.2 秒，约 40 个 HEAD）
+            → 16 线程并发下载全部序号
+            → ffmpeg concat 无损拼接（-c copy，不重编码）
+```
+
+实测（1 小时 43 分课程）：**1241 片 / 740 MB，23 秒下完（54 片/秒）**，拼接约 1 分钟，
+成片 675 MB / 1920×1080 / H.264+AAC。分片是未加密裸 TS（首字节 `0x47`）。
+
+> **为什么不去解密而绕过**：混淆正文并非标准 base64（`=` 落在串中间、长度非 4 的倍数），
+> 用 `uuid` / `app_id` / `sign` / 路径片段做 XOR 轮换都解不开，是自研分块方案。
+> 硬解要逆向播放器 JS，收益为零——分片本身既不加密也不带签名路径绑定。
+
+#### 用法
+
+```bash
+# 完整流程（下载 + 转写）
+python "scripts/multi-media-processor.py" "<课程链接>"
+
+# 只下载不转写（长课程推荐先确认成片可播）
+python "scripts/multi-media-processor.py" "<课程链接>" --no-whisper
+
+# 调并发 / 换 profile / 保留分片缓存
+python "scripts/multi-media-processor.py" "<课程链接>" --xet-workers 24 --xet-profile D:\xet_ck --xet-keep-segments
+
+# 直接给 m3u8（不需要浏览器）
+python "scripts/multi-media-processor.py" "https://xxx/index.m3u8?sign=..."
+
+# 单独调试：只捕获流地址，打印 JSON
+python "scripts/xet_downloader.py" "<课程链接>" --capture-only
+```
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--xet-workers` | 16 | 分片并发数。实测 16 线程 54 片/秒；太高易触发 CDN 限流 |
+| `--xet-profile` | `~/.workbuddy/xet_profile` | 浏览器 profile（保存登录态） |
+| `--xet-keep-segments` | 关 | 保留分片缓存，便于断点续传/排查 |
+
+环境变量：`XET_PROFILE_DIR`（profile 目录）、`XET_WORKERS`（并发数）、`XET_HEADLESS=1`（无头，仅调试）。
+
+#### 登录态
+
+- 用 Playwright 驱动**本机已安装的 Edge**（回退 Chrome → 内置内核），不下载 Playwright 浏览器
+- 独立 profile 目录，**扫码一次长期复用**，不进技能目录、不随技能发布
+- 首次运行会弹出真实浏览器窗口，等用户扫码；检测到已跳出登录页即继续
+- 登录失败/未开通课程时表现为「未捕获到任何视频流地址」，不会产出坏文件
+
+#### 依赖
+
+```bash
+python -m pip install playwright   # 不要加 playwright install，复用系统 Edge/Chrome
+```
+
+#### 实现上踩过的坑（改代码时别踩回去）
+
+| 坑 | 现象 | 正解 |
+|----|------|------|
+| **按捕获序号长度补零** | 捕获到 `v.f146750_277.ts`，按 `len("277")=3` 补零后序号 0 拼成 `v.f146750_000.ts` → 404，枚举全崩 | 只有捕获到的序号**本身以 0 开头**（`_00042.ts`）才认为有补零，否则宽度记 0 |
+| **KPI 上报 URL 被当成 m3u8** | `alivereport.xiaoeknow.com/report/alive_information?...play_url=...m3u8` 混进 m3u8 列表 | 判断类型**只看 `urlparse(u).path` 后缀**，不看整条 URL |
+| **播放器 `src` 是 `blob:`** | DOM 里读 `<video>` 拿不到地址 | 监听网络请求，不看 DOM |
+| **地址栏 `javascript:` 被执行策略拦** | 想读 `performance` 记录，页面标题无变化（JS 根本没跑） | 用 Playwright 的网络监听，别绕 CSP |
+| **Playwright 自带 ffmpeg 解不了 TS** | 报 `Invalid data found when processing input` | 它是录屏用精简构建，没有 mpegts 解封装器 → 用技能自带的 `bin/whisper/bin/ffmpeg.exe` |
+| **分片序号的样本可能有偏移** | 不同 VOD 起始序号可能不是 0 | `find_bounds()` 同时向上、向下指数探测再二分，不假设从 0 开始 |
+
+> **只做个人离线观看**。课程视频受平台条款与个人授权限制，不要二次分发。

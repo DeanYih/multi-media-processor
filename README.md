@@ -1,8 +1,8 @@
 # 多媒体处理助手 (Multi-Media Processor)
 
-> 微信视频号 / 公众号 / B站 / 抖音 / YouTube 等平台的视频下载与转写工具
+> 微信视频号 / 公众号 / 小鹅通课程 / B站 / 抖音 / YouTube 等平台的视频下载与转写工具
 >
-> 当前版本：**v1.3.9**
+> 当前版本：**v1.4.0**
 
 ## 🚀 快速开始
 
@@ -18,9 +18,21 @@ gh skill install deanyih/multi-media-processor
 
 - **视频号解析**：`weixin.qq.com/sph/...` → 下载 → Whisper 转写
 - **公众号文章**：`mp.weixin.qq.com/...` → 抓取正文 → 结构化摘要
+- **小鹅通课程**：`*.h5.xet.pomoho.com/...` → 浏览器捕获视频流 → 分片枚举下载 → 拼接 → 转写
 - **多平台支持**：B站、抖音、YouTube、TikTok、小红书、微博等
+- **直接 m3u8**：给出播放列表地址 → ffmpeg 直读（自带 AES-128 解密）
 - **本地文件**：支持 mp4/avi/mkv/mov/mp3/wav/flac 等常见格式
 - **输出格式**：txt / srt / markdown / docx（四选一或全部）
+
+### v1.4.0 新增能力
+
+- **小鹅通课程视频下载**：课程页视频流带客户端签名 + `confusion_index` 混淆，纯 HTTP 抓不到。
+  改为用 Playwright 驱动本机已装 Edge/Chrome 捕获流地址（扫码登录一次，profile 长期复用），
+  然后**不解密、直接绕过分片枚举**——实测其分片签名不绑定路径，任意序号可取：
+  指数探测 + 二分定边界 → 16 线程并发下载 → ffmpeg `-c copy` 无损拼接。
+  实测 1 小时 43 分课程（1241 片 / 740 MB）23 秒下完，拼接 1 分钟。
+- **直接 m3u8 入参**：`.m3u8` 链接无需走平台解析，ffmpeg 直读即可。
+- **按 URL path 判定流类型**：修掉「KPI 上报接口 query 里带 m3u8 被误认为播放列表」的误判。
 
 ### v1.3.x 新增能力
 
@@ -43,6 +55,20 @@ gh skill install deanyih/multi-media-processor
 3. 写入环境变量 `WX_SPH_COOKIE`（推荐 `~/.workbuddy/.secrets.env` 追加一行，**不要用 setx**——Cookie 超长会被 Windows 1024 字符上限截断）
 
 技能运行时自动注入到 `config.yaml`，下载完成后自动清空明文。**请勿把含 Cookie 的 config.yaml 提交进仓库**（.gitignore 已排除）。
+
+### 小鹅通课程（v1.4.0+，不需要 Cookie 字符串）
+
+小鹅通不用 Cookie 字符串，而是用**真实浏览器登录态**：
+
+```bash
+# 首次会弹出浏览器窗口，扫码登录一次；之后登录态存在 profile 里长期复用
+python scripts/multi-media-processor.py "<课程链接>"
+```
+
+- 依赖 `pip install playwright`（**不要**跑 `playwright install`，直接复用系统已装 Edge/Chrome）
+- profile 目录默认 `~/.workbuddy/xet_profile`，可用 `--xet-profile` 或 `XET_PROFILE_DIR` 改
+- 并发数默认 16，可用 `--xet-workers` 调
+- 只下载不转写：加 `--no-whisper`
 
 ### 可选配置（LLM 增强）
 
@@ -68,6 +94,7 @@ gh skill install deanyih/multi-media-processor
 
 Python 依赖（自动安装）：
 - httpx, yt-dlp, requests, zhconv
+- playwright —— 仅小鹅通分支需要（`xet_downloader.py` 按需导入，不装不影响其它平台），首次用需手动 `pip install playwright`
 
 ## 📄 输出示例
 
@@ -85,10 +112,11 @@ output/multi-media/video_title/
 ## 📁 仓库结构
 
 ```
-├── SKILL.md                            # 技能说明（v1.3.8 完整文档）
+├── SKILL.md                            # 技能说明（v1.4.0 完整文档）
 ├── config.template.yaml                # 配置模板（无任何密钥）
 └── scripts/
     ├── multi-media-processor.py        # 主脚本
+    ├── xet_downloader.py               # 小鹅通流捕获 / 分片枚举下载（v1.4.0+）
     ├── scene_audio.py                  # 场景识别 / OCR / 音频事件模块
     ├── install_dependencies.py         # 依赖自动安装
     ├── cross_validate_ocr_asr.py       # OCR×ASR 跨验证（唱歌视频歌词精准校正）
