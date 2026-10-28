@@ -818,7 +818,8 @@ python "scripts/xet_downloader.py" "<课程链接>" --capture-only
 | `--xet-profile` | `~/.workbuddy/xet_profile` | 浏览器 profile（保存登录态） |
 | `--xet-keep-segments` | 关 | 保留分片缓存，便于断点续传/排查 |
 
-环境变量：`XET_PROFILE_DIR`（profile 目录）、`XET_WORKERS`（并发数）、`XET_HEADLESS=1`（无头，仅调试）。
+环境变量：`XET_PROFILE_DIR`（profile 目录）、`XET_WORKERS`（并发数）、`XET_HEADLESS=1`（无头，仅调试）、
+`XET_MAX_SEGMENTS=N`（只下前 N 片，用来快速确认「这个课程能不能下」而不必等全量）。
 
 #### 登录态
 

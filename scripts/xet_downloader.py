@@ -511,13 +511,21 @@ def download_xet(url: str, outdir, name_hint: str | None = None,
     if est > 20000:
         raise RuntimeError(f"探测到 {est} 个分片，明显不合理，已中止（请重新捕获）")
 
+    # 调试/抽样开关：只下前 N 片，用来快速确认「这个课程能不能下」而不必等全量
+    cap = os.environ.get("XET_MAX_SEGMENTS")
+    if cap and cap.isdigit() and 0 < int(cap) < est:
+        hi = lo + int(cap) - 1
+        log(f"[抽样] XET_MAX_SEGMENTS={cap} —— 只下载前 {cap} 片（{est} 片中的一段），"
+            f"产物为短视频片段")
+    expect = hi - lo + 1
+
     segdir = outdir / "_segments"
-    log(f"[计划] 并发 {workers} 线程下载 {est} 片")
+    log(f"[计划] 并发 {workers} 线程下载 {expect} 片")
     download_segments(parts, lo, hi, segdir, headers, workers=workers, log=log)
 
     n, bad = verify_segments(segdir, log=log)
-    if n < est:
-        log(f"!! 分片不齐（{n}/{est}），拼接结果可能缺尾部；可重跑续传")
+    if n < expect:
+        log(f"!! 分片不齐（{n}/{expect}），拼接结果可能缺尾部；可重跑续传")
     if bad > 0:
         log(f"!! 抽样发现 {bad} 个分片不是 TS —— 可能开了分片加密，产物或不可播")
 
